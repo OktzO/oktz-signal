@@ -56,6 +56,19 @@ fn now_ms() -> i64 {
 
 /// Initiator side (SessionBuilder.processPreKey): build initial session record.
 pub fn build_initial_session(params: &X3dhParams) -> Result<String, String> {
+    // Ephemeral base key — fresh random seed (OsRng only).
+    let mut seed = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    build_initial_session_with_ephemeral(params, &seed)
+}
+
+/// Same as [`build_initial_session`] with caller-provided ephemeral private key.
+/// Tests pass a fixed key to pin key roles; keeps the OsRng path in the public fn.
+pub(crate) fn build_initial_session_with_ephemeral(
+    params: &X3dhParams,
+    ephemeral_priv: &[u8],
+) -> Result<String, String> {
     // 1. Verify signed prekey signature against recipient identity key.
     let recipient_pub_32 = params
         .recipient_pub
@@ -66,16 +79,13 @@ pub fn build_initial_session(params: &X3dhParams) -> Result<String, String> {
         return Err("signed prekey signature verification failed".to_string());
     }
 
-    // 2. Ephemeral base key — fresh random seed (OsRng only).
-    let mut seed = [0u8; 32];
-    use rand::RngCore;
-    rand::rngs::OsRng.fill_bytes(&mut seed);
-    let (ephemeral_priv, ephemeral_pub) = curve::generate_keypair(&seed)?;
+    // 2. Ephemeral base key — public = base(priv). generate_keypair returns (pub, seed).
+    let (ephemeral_pub, _) = curve::generate_keypair(ephemeral_priv)?;
 
     // 3. DH agreements.
     let a1 = curve::scalar_multiply(params.identity_priv, params.signed_prekey_pub)?;
-    let a2 = curve::scalar_multiply(&ephemeral_priv, recipient_pub_32)?;
-    let a3 = curve::scalar_multiply(&ephemeral_priv, params.signed_prekey_pub)?;
+    let a2 = curve::scalar_multiply(ephemeral_priv, recipient_pub_32)?;
+    let a3 = curve::scalar_multiply(ephemeral_priv, params.signed_prekey_pub)?;
 
     // 4. Shared secret: 0xff*32 || a1 || a2 || a3 [|| a4].
     let has_opk = params.prekey_pub.is_some();
@@ -88,7 +98,7 @@ pub fn build_initial_session(params: &X3dhParams) -> Result<String, String> {
     shared[64..96].copy_from_slice(&a2);
     shared[96..128].copy_from_slice(&a3);
     if let Some(opk) = params.prekey_pub {
-        let a4 = curve::scalar_multiply(&ephemeral_priv, opk)?;
+        let a4 = curve::scalar_multiply(ephemeral_priv, opk)?;
         shared[128..160].copy_from_slice(&a4);
     }
 
@@ -103,7 +113,7 @@ pub fn build_initial_session(params: &X3dhParams) -> Result<String, String> {
         registrationId: params.registration_id,
         currentRatchet: Ratchet {
             ephemeralKeyPair: KeyPair {
-                privKey: crate::util::b64(&ephemeral_priv),
+                privKey: crate::util::b64(ephemeral_priv),
                 pubKey: crate::util::b64(&ephemeral_pub),
             },
             lastRemoteEphemeralKey: crate::util::b64(params.signed_prekey_pub),
@@ -126,7 +136,7 @@ pub fn build_initial_session(params: &X3dhParams) -> Result<String, String> {
 
     // 7. calculateSendingRatchet: shared = DH(ephemeral_priv, theirSignedPubKey),
     //    deriveSecrets(shared, rootKey, "WhisperRatchet"), add sending chain.
-    let shared_ratchet = curve::scalar_multiply(&ephemeral_priv, params.signed_prekey_pub)?;
+    let shared_ratchet = curve::scalar_multiply(ephemeral_priv, params.signed_prekey_pub)?;
     let mk_ratchet = derive_secrets(&shared_ratchet, &root_key, b"WhisperRatchet")?;
     root_key = mk_ratchet[0].clone();
     entry.currentRatchet.rootKey = crate::util::b64(&root_key);
@@ -227,5 +237,51 @@ mod tests {
         assert_eq!(entry.indexInfo.closed, -1);
         assert_eq!(entry.chains.len(), 1);
         assert!(!entry.currentRatchet.rootKey.is_empty());
+    }
+
+    #[test]
+    fn test_keypair_roles_pinned() {
+        let sk = [0x42u8; 32];
+        let spk = [0x43u8; 32];
+        let sig = curve::sign(&sk, &spk, None).unwrap();
+        let params = test_params(42, 0x42, 0x43, &sig);
+
+        let fixed_priv = [0x55u8; 32];
+        let (expected_pub, _) = curve::generate_keypair(&fixed_priv).unwrap();
+
+        let result = build_initial_session_with_ephemeral(&params, &fixed_priv);
+        assert!(result.is_ok(), "build failed: {:?}", result.err());
+        let record = session::deserialize(&result.unwrap()).unwrap();
+        let entry = record.sessions.values().next().unwrap();
+
+        let b64_priv = crate::util::b64(&fixed_priv);
+        let b64_pub = crate::util::b64(&expected_pub);
+
+        // privKey is the private key, pubKey is the public key — roles are NOT swapped.
+        assert_eq!(entry.currentRatchet.ephemeralKeyPair.privKey, b64_priv);
+        assert_eq!(entry.currentRatchet.ephemeralKeyPair.pubKey, b64_pub);
+        assert_ne!(b64_priv, b64_pub, "priv and pub must differ");
+
+        // baseKey / chain map key hold the public key, not the private.
+        assert_eq!(entry.indexInfo.baseKey, b64_pub);
+        assert!(record.sessions.contains_key(&b64_pub));
+
+        // Cross-check chainKey derivation: re-compute the entire pipeline for
+        // the sending ratchet chain key using fixed_priv.
+        let recipient_pub_32 = params.recipient_pub.get(1..33).unwrap();
+        let a1 = curve::scalar_multiply(params.identity_priv, params.signed_prekey_pub).unwrap();
+        let a2 = curve::scalar_multiply(&fixed_priv, recipient_pub_32).unwrap();
+        let a3 = curve::scalar_multiply(&fixed_priv, params.signed_prekey_pub).unwrap();
+        let mut shared = vec![0xffu8; 128];
+        shared[32..64].copy_from_slice(&a1);
+        shared[64..96].copy_from_slice(&a2);
+        shared[96..128].copy_from_slice(&a3);
+        let mk = derive_secrets(&shared, &[0u8; 32], b"WhisperText").unwrap();
+        let root_key = &mk[0];
+        let shared_ratchet = curve::scalar_multiply(&fixed_priv, params.signed_prekey_pub).unwrap();
+        let mk_ratchet = derive_secrets(&shared_ratchet, root_key, b"WhisperRatchet").unwrap();
+
+        let chain = entry.chains.values().next().unwrap();
+        assert_eq!(chain.chainKey.key, crate::util::b64(&mk_ratchet[1]));
     }
 }

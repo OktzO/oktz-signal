@@ -1,7 +1,7 @@
-// curve25519-rs — native Rust untuk fungsi curve25519 yang TIDAK ada native di
-// Node.js: XEdDSA sign/verify (Signal). generateKeyPair + sharedKey sudah
-// native node:crypto (x25519 keygen + diffieHellman) → TIDAK dibuat ulang,
-// zero binary tambahan untuk yang Node sudah punya.
+// curve25519-rs — native Rust untuk curve25519 DH (X25519) dan XEdDSA
+// sign/verify. generate_keypair + scalar_multiply dipakai oleh X3DH dan
+// double ratchet (Rust, bukan node:crypto). XEdDSA sign/verify tetap
+// Rust (tidak ada di Node), napi wrapper ditambahkan Task 7+.
 //
 // Implementasi XEdDSA = BUKAN Ed25519 standar: konversi Montgomery↔Edwards,
 // secret key dipakai langsung di hash (r = SHA512(sk||m)), sign bit di byte
@@ -122,9 +122,9 @@ fn pubkey_montgomery_to_edwards(pk: &[u8; 32], sign_bit: u8) -> Option<EdwardsPo
 }
 
 // --- public API (murni Rust; napi wrapper di lib.rs, Task 7) ---
-// CATATAN: generateKeyPair + sharedKey TIDAK dibuat di Rust — Node 20/22
-// sudah native (node:crypto generateKeyPairSync('x25519') + diffieHellman).
-// Hanya XEdDSA sign/verify (yang tidak ada di Node) yang dibuat native.
+// CATATAN: generate_keypair + scalar_multiply (X25519 DH) dipakai oleh
+// X3DH dan double ratchet (Rust). XEdDSA sign/verify tetap Rust — napi
+// wrapper ditambahkan Task 7+.
 
 /// sign(secretKey, msg, opt_random?) → signature 64 byte (XEdDSA)
 pub fn sign(secret_key: &[u8], msg: &[u8], opt_random: Option<&[u8]>) -> Result<[u8; 64], String> {
@@ -205,6 +205,37 @@ pub fn scalar_multiply(secret_key: &[u8], public_key: &[u8]) -> Result<[u8; 32],
 mod tests {
     use super::*;
 
+    fn hex_to_bytes(s: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        out
+    }
+
+    fn bytes_to_hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect()
+    }
+
+    #[test]
+    fn test_rfc7748_x25519_known_answer() {
+        // RFC 7748 §5.2 — vektor eksternal, bukan self-consistency.
+        let alice_sk = hex_to_bytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+        let alice_pk_expected =
+            hex_to_bytes("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        let bob_pk =
+            hex_to_bytes("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        let shared_expected =
+            hex_to_bytes("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+
+        let (pk, sk) = generate_keypair(&alice_sk).unwrap();
+        assert_eq!(bytes_to_hex(&pk), bytes_to_hex(&alice_pk_expected), "public key");
+        assert_eq!(sk, alice_sk, "secret key passthrough");
+
+        let shared = scalar_multiply(&alice_sk, &bob_pk).unwrap();
+        assert_eq!(bytes_to_hex(&shared), bytes_to_hex(&shared_expected), "shared secret");
+    }
+
     #[test]
     fn test_sign_verify_roundtrip() {
         let sk = [0xABu8; 32];
@@ -274,5 +305,19 @@ mod tests {
         assert!(generate_keypair(&[0u8; 31]).is_err());
         assert!(scalar_multiply(&[0u8; 31], &[0u8; 32]).is_err());
         assert!(scalar_multiply(&[0u8; 32], &[0u8; 31]).is_err());
+    }
+
+    #[test]
+    fn test_xeddsa_known_answer() {
+        // Vektor tetap: sign(alice_sk, b"known answer test") — deterministik.
+        // Nilai diverifikasi dengan implementasi bit-exact (self-consistency
+        // regression test setelah sign_internal stabil).
+        let sk = hex_to_bytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+        let expected_sig = "463d2ebbfc57cfc5c879c028f08e6f3fdc44682c19b6192f54a37cc5a8323d4bc8e572ac577ea909ebda5a3aa3187722d1ad3b0e8c552fc430d0c09e1330be87";
+        let msg = b"known answer test";
+        let sig = sign(&sk, msg, None).unwrap();
+        assert_eq!(bytes_to_hex(&sig), expected_sig);
+        let (pk, _) = generate_keypair(&sk).unwrap();
+        assert!(verify(&pk, msg, &sig).unwrap());
     }
 }

@@ -1,0 +1,26 @@
+{
+  "name": "oktz-signal",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Signal protocol Rust native — MIT replacement for libsignal (GPL)",
+  "main": "index.js",
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "src/",
+    "native/signal/index.cjs",
+    "native/signal/signal.linux-x64-gnu.node"
+  ],
+  "scripts": {
+    "build:native": "cd native/signal && npx cargo-cp-artifact --artifact cdylib signal signal.linux-x64-gnu.node -- cargo build --release --message-format=json-render-diagnostics",
+    "build": "npm run build:native",
+    "test": "node --test tests/**/*.test.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "libsignal": "^6.0.0"
+  }
+}

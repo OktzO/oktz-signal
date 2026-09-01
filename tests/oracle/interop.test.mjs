@@ -47,6 +47,16 @@ function buildBobSessionJson(aliceSessionJson, bobIdentityPub33, senderIdentityP
 
   const senderIdentityB64 = Buffer.from(senderIdentityPub33).toString('base64');
 
+  // Strip 0x05 prefix from Alice's ephemeral key (33B → 32B) to match
+  // production behavior (x3dhBuildRecipientSession strips base_key before
+  // keying receiving chain). Real WhatsApp messages carry 33-byte ephemeral
+  // keys, but receiving chains are keyed by the 32-byte X25519 key.
+  const aEphRaw = Buffer.from(aEphPub, 'base64');
+  const aEph32 = aEphRaw[0] === 0x05 && aEphRaw.length === 33
+    ? aEphRaw.subarray(1)
+    : aEphRaw;
+  const aEphPub32 = aEph32.toString('base64');
+
   const bobSession = {
     _sessions: {
       [Buffer.from(bobPub).toString('base64')]: {
@@ -56,7 +66,7 @@ function buildBobSessionJson(aliceSessionJson, bobIdentityPub33, senderIdentityP
             pubKey: Buffer.from(bobPub).toString('base64'),
             privKey: Buffer.from(bobPriv).toString('base64')
           },
-          lastRemoteEphemeralKey: aEphPub,
+          lastRemoteEphemeralKey: aEphPub32,
           previousCounter: 0,
           rootKey: rootKey
         },
@@ -69,7 +79,7 @@ function buildBobSessionJson(aliceSessionJson, bobIdentityPub33, senderIdentityP
           remoteIdentityKey: senderIdentityB64
         },
         _chains: {
-          [aEphPub]: {
+          [aEphPub32]: {
             chainKey: {
               counter: -1,
               key: aSendChain.chainKey.key

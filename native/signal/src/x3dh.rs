@@ -76,6 +76,13 @@ pub(crate) fn build_initial_session_with_ephemeral(
         .recipient_pub
         .get(1..33)
         .ok_or("recipient_pub must be 33 bytes")?;
+    // signed_prekey_pub dari JS = 33-byte (0x05 prefix) — signature dibuat atas 33-byte penuh
+    // Untuk DH, strip ke 32-byte X25519
+    let spk = if params.signed_prekey_pub.len() == 33 && params.signed_prekey_pub[0] == 0x05 {
+        &params.signed_prekey_pub[1..]
+    } else {
+        params.signed_prekey_pub
+    };
     let verified = curve::verify(recipient_pub_32, params.signed_prekey_pub, params.signed_prekey_sig)?;
     if !verified {
         return Err("signed prekey signature verification failed".to_string());
@@ -84,10 +91,10 @@ pub(crate) fn build_initial_session_with_ephemeral(
     // 2. Ephemeral base key — public = base(priv). generate_keypair returns (pub, seed).
     let (ephemeral_pub, _) = curve::generate_keypair(ephemeral_priv)?;
 
-    // 3. DH agreements.
-    let a1 = curve::scalar_multiply(params.identity_priv, params.signed_prekey_pub)?;
+    // 3. DH agreements — pakai spk (32-byte, stripped)
+    let a1 = curve::scalar_multiply(params.identity_priv, spk)?;
     let a2 = curve::scalar_multiply(ephemeral_priv, recipient_pub_32)?;
-    let a3 = curve::scalar_multiply(ephemeral_priv, params.signed_prekey_pub)?;
+    let a3 = curve::scalar_multiply(ephemeral_priv, spk)?;
 
     // 4. Shared secret: 0xff*32 || a1 || a2 || a3 [|| a4].
     let has_opk = params.prekey_pub.is_some();
@@ -100,7 +107,13 @@ pub(crate) fn build_initial_session_with_ephemeral(
     shared[64..96].copy_from_slice(&a2);
     shared[96..128].copy_from_slice(&a3);
     if let Some(opk) = params.prekey_pub {
-        let a4 = curve::scalar_multiply(ephemeral_priv, opk)?;
+        // opk dari JS = 33-byte (0x05 prefix) — strip untuk DH
+        let opk32 = if opk.len() == 33 && opk[0] == 0x05 {
+            &opk[1..]
+        } else {
+            opk
+        };
+        let a4 = curve::scalar_multiply(ephemeral_priv, opk32)?;
         shared[128..160].copy_from_slice(&a4);
     }
 
@@ -118,7 +131,7 @@ pub(crate) fn build_initial_session_with_ephemeral(
                 privKey: crate::util::b64(ephemeral_priv),
                 pubKey: crate::util::b64(&ephemeral_pub),
             },
-            lastRemoteEphemeralKey: crate::util::b64(params.signed_prekey_pub),
+            lastRemoteEphemeralKey: crate::util::b64(spk),
             previousCounter: 0,
             rootKey: crate::util::b64(&root_key),
         },
@@ -140,7 +153,7 @@ pub(crate) fn build_initial_session_with_ephemeral(
 
     // 7. calculateSendingRatchet: shared = DH(ephemeral_priv, theirSignedPubKey),
     //    deriveSecrets(shared, rootKey, "WhisperRatchet"), add sending chain.
-    let shared_ratchet = curve::scalar_multiply(ephemeral_priv, params.signed_prekey_pub)?;
+    let shared_ratchet = curve::scalar_multiply(ephemeral_priv, spk)?;
     let mk_ratchet = derive_secrets(&shared_ratchet, &root_key, b"WhisperRatchet")?;
     root_key = mk_ratchet[0].clone();
     entry.currentRatchet.rootKey = crate::util::b64(&root_key);

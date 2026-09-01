@@ -114,7 +114,7 @@ describe('protocol oracle: libsignal → oktz-signal interop', () => {
     // 2. Bob's signed prekey (32-byte X25519 key)
     const spkPriv = Buffer.alloc(32, 0xCC);
     const spkPub = native.curveGenerateKeypair(spkPriv)[0]; // 32 bytes
-    const spkSig = native.curveSign(bobPriv, Buffer.from(spkPub), null); // 64 bytes
+    const spkSig = native.curveSign(bobPriv, Buffer.concat([Buffer.from([5]), spkPub]), null); // 64 bytes
 
     // 3. Bob's one-time prekey
     const opkPriv = Buffer.alloc(32, 0xDD);
@@ -196,7 +196,7 @@ describe('protocol oracle: oktz-signal → libsignal interop', () => {
     // 2. Bob's signed prekey
     const spkPriv = Buffer.alloc(32, 0x33);
     const spkPub = native.curveGenerateKeypair(spkPriv)[0]; // 32 bytes
-    const spkSig = native.curveSign(bobPriv, Buffer.from(spkPub), null);
+    const spkSig = native.curveSign(bobPriv, Buffer.concat([Buffer.from([5]), spkPub]), null);
 
     // 3. Bob's one-time prekey
     const opkPriv = Buffer.alloc(32, 0x44);
@@ -205,7 +205,7 @@ describe('protocol oracle: oktz-signal → libsignal interop', () => {
     // 4. Create Alice session with oktz-native x3dh
     const aliceSessionJson = native.x3DhBuildInitialSession(
       alicePriv, alicePub33,
-      spkPub, spkSig,
+      Buffer.concat([Buffer.from([5]), spkPub]), spkSig,
       opkPub, 2, // prekeyPub, prekeyId
       bobPub33, spkPub, 42, 1 // signed_key_id
     );
@@ -260,7 +260,7 @@ describe('session record oracle', () => {
     const bobPub33 = libsignal.curve.getPublicFromPrivateKey(bobPriv);
     const spkPriv = Buffer.alloc(32, 0x77);
     const spkPub = native.curveGenerateKeypair(spkPriv)[0];
-    const spkSig = native.curveSign(bobPriv, Buffer.from(spkPub), null);
+    const spkSig = native.curveSign(bobPriv, Buffer.concat([Buffer.from([5]), spkPub]), null);
 
     let storedSession = null;
     const storage = {

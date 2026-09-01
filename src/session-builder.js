@@ -23,16 +23,16 @@ export class SessionBuilder {
       const recipientKey = device.identityKey;
       if (!recipientKey) throw new Error('No identity key for recipient');
 
-      // Initator X3DH: signed_prekey_pub (3rd) and prekey_pub (5th) go to
-      // X25519 scalar_multiply → must be 32 bytes (strip 0x05). recipient_pub
-      // (7th) is the recipient identity, native strips [1..33] internally so it
-      // stays 33-byte. signed_prekey_sig (4th) is 64 bytes.
+      // Initator X3DH: signed_prekey_pub (3rd) dikirim 33-byte penuh — signature
+      // dibuat atas 33-byte. Native strip internal untuk DH (spk = [1..]).
+      // prekey_pub (5th) juga 33-byte — native strip internal. recipient_pub (7th)
+      // tetap 33-byte, native strip [1..33]. signed_prekey_sig (4th) 64 bytes.
       const sessionJson = native.x3DhBuildInitialSession(
         Buffer.from(identity.privKey),
         Buffer.from(identity.pubKey),
-        Buffer.from(strip05(Buffer.from(device.signedPreKey.publicKey))),
+        Buffer.from(device.signedPreKey.publicKey),
         Buffer.from(device.signedPreKey.signature),
-        device.preKey ? Buffer.from(strip05(Buffer.from(device.preKey.publicKey))) : null,
+        device.preKey ? Buffer.from(device.preKey.publicKey) : null,
         device.preKey ? (device.preKey.keyId != null ? device.preKey.keyId : null) : null,
         Buffer.from(recipientKey),
         Buffer.from(device.signedPreKey.publicKey),

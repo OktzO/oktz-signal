@@ -74,7 +74,7 @@ describe('JS wrapper X3DH roundtrip', () => {
     const bobPub33 = identityOf(bobPriv);
     const spkPriv = Buffer.alloc(32, 0x33);
     const spkPub = native.curveGenerateKeypair(spkPriv)[0];
-    const spkSig = native.curveSign(bobPriv, Buffer.from(spkPub), null);
+    const spkSig = native.curveSign(bobPriv, Buffer.concat([Buffer.from([0x05]), spkPub]), null);
     const opkPriv = Buffer.alloc(32, 0x44);
     const opkPub = native.curveGenerateKeypair(opkPriv)[0];
 

@@ -7,7 +7,7 @@ export class SessionRecord {
     if (typeof data === 'string') {
       this._json = native.sessionDeserialize(data);
     } else {
-      this._json = data || '{}';
+      this._json = native.sessionDeserialize(JSON.stringify(data || {}));
     }
   }
   static deserialize(data) { return new SessionRecord(data); }

@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 // curve25519-rs — native Rust untuk curve25519 DH (X25519) dan XEdDSA
 // sign/verify. generate_keypair + scalar_multiply dipakai oleh X3DH dan
 // double ratchet (Rust, bukan node:crypto). XEdDSA sign/verify tetap

@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 // Double Ratchet encrypt/decrypt (Signal Protocol, v6 wire-compatible).
 // Wire format verified against libsignal v6 oracle:
 //   - Message key: HMAC-SHA256(chainKey.key, [0x01]); chain step HMAC [0x02].
@@ -168,12 +169,14 @@ fn maybe_step_ratchet(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
 pub struct EncryptResult {
     pub session_json: String,
     pub message_type: u8,
     pub ciphertext: Vec<u8>,
 }
 
+#[derive(serde::Serialize)]
 pub struct DecryptResult {
     pub session_json: String,
     pub plaintext: Vec<u8>,

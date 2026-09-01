@@ -1,3 +1,6 @@
+#![deny(unsafe_code)]
+
+use serde::{Deserialize, Serialize};
 // proto.rs — hand-written minimal protobuf wire codec
 // WhisperMessage + PreKeyWhisperMessage (Signal protocol wire format).
 //
@@ -15,6 +18,7 @@
 //                        WhisperMessage), 5 registration_id (varint),
 //                        6 signed_pre_key_id (varint, optional)
 
+#[derive(Serialize, Deserialize)]
 pub struct WhisperMessage {
     pub ephemeral_key: Vec<u8>,
     pub counter: u32,
@@ -22,6 +26,7 @@ pub struct WhisperMessage {
     pub ciphertext: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct PreKeyWhisperMessage {
     pub pre_key_id: Option<u32>,
     pub base_key: Vec<u8>,

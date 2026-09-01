@@ -1,5 +1,4 @@
-#![deny(unsafe_code)]
-
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 pub mod curve;
@@ -9,5 +8,171 @@ pub mod util;
 pub mod x3dh;
 pub mod ratchet;
 
-// Placeholder: module bodies will be added in subsequent tasks.
-// Each module is a separate file in src/.
+// ── curve ──
+
+#[napi]
+pub fn curve_sign(secret_key: Buffer, message: Buffer, random: Option<Buffer>) -> Result<Buffer> {
+    let sig = curve::sign(
+        secret_key.as_ref(),
+        message.as_ref(),
+        random.as_deref().map(|b| b.as_ref()),
+    )
+    .map_err(|e| Error::from_reason(e))?;
+    Ok(Buffer::from(&sig[..]))
+}
+
+#[napi]
+pub fn curve_verify(public_key: Buffer, message: Buffer, signature: Buffer) -> Result<bool> {
+    curve::verify(public_key.as_ref(), message.as_ref(), signature.as_ref())
+        .map_err(|e| Error::from_reason(e))
+}
+
+#[napi]
+pub fn curve_scalar_multiply(secret_key: Buffer, public_key: Buffer) -> Result<Buffer> {
+    let result = curve::scalar_multiply(secret_key.as_ref(), public_key.as_ref())
+        .map_err(|e| Error::from_reason(e))?;
+    Ok(Buffer::from(&result[..]))
+}
+
+#[napi]
+pub fn curve_generate_keypair(seed: Buffer) -> Result<Vec<Buffer>> {
+    let (pub_key, priv_key) = curve::generate_keypair(seed.as_ref())
+        .map_err(|e| Error::from_reason(e))?;
+    Ok(vec![Buffer::from(&pub_key[..]), Buffer::from(&priv_key[..])])
+}
+
+// ── proto ──
+
+#[napi]
+pub fn proto_encode_whisper(
+    ephemeral_key: Buffer,
+    counter: u32,
+    previous_counter: u32,
+    ciphertext: Buffer,
+) -> Result<Buffer> {
+    let msg = proto::WhisperMessage {
+        ephemeral_key: ephemeral_key.to_vec(),
+        counter,
+        previous_counter,
+        ciphertext: ciphertext.to_vec(),
+    };
+    let encoded = proto::encode_whisper(&msg).map_err(|e| Error::from_reason(e))?;
+    Ok(Buffer::from(encoded))
+}
+
+#[napi]
+pub fn proto_decode_whisper(bytes: Buffer) -> Result<String> {
+    let msg = proto::decode_whisper(bytes.as_ref()).map_err(|e| Error::from_reason(e))?;
+    serde_json::to_string(&msg).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+#[napi]
+pub fn proto_encode_pkmsg(json: String) -> Result<Buffer> {
+    let msg: proto::PreKeyWhisperMessage = serde_json::from_str(&json)
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+    let encoded = proto::encode_pkmsg(&msg).map_err(|e| Error::from_reason(e))?;
+    Ok(Buffer::from(encoded))
+}
+
+#[napi]
+pub fn proto_decode_pkmsg(bytes: Buffer) -> Result<String> {
+    let msg = proto::decode_pkmsg(bytes.as_ref()).map_err(|e| Error::from_reason(e))?;
+    serde_json::to_string(&msg).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+// ── session ──
+
+#[napi]
+pub fn session_deserialize(json: String) -> Result<String> {
+    let record = session::deserialize(&json).map_err(|e| Error::from_reason(e))?;
+    session::serialize(&record).map_err(|e| Error::from_reason(e))
+}
+
+#[napi]
+pub fn session_serialize(json: String) -> Result<String> {
+    let record = session::deserialize(&json).map_err(|e| Error::from_reason(e))?;
+    session::serialize(&record).map_err(|e| Error::from_reason(e))
+}
+
+#[napi]
+pub fn session_have_open_session(json: String) -> Result<bool> {
+    let record = session::deserialize(&json).map_err(|e| Error::from_reason(e))?;
+    Ok(session::have_open_session(&record))
+}
+
+// ── x3dh ──
+
+#[napi]
+pub fn x3dh_build_initial_session(
+    identity_priv: Buffer,
+    identity_pub: Buffer,
+    signed_prekey_pub: Buffer,
+    signed_prekey_sig: Buffer,
+    prekey_pub: Option<Buffer>,
+    prekey_id: Option<u32>,
+    recipient_pub: Buffer,
+    recipient_prekey: Buffer,
+    registration_id: u32,
+) -> Result<String> {
+    let params = x3dh::X3dhParams {
+        identity_priv: identity_priv.as_ref(),
+        identity_pub: identity_pub.as_ref(),
+        signed_prekey_pub: signed_prekey_pub.as_ref(),
+        signed_prekey_sig: signed_prekey_sig.as_ref(),
+        prekey_pub: prekey_pub.as_ref().map(|b| b.as_ref()),
+        prekey_id,
+        recipient_pub: recipient_pub.as_ref(),
+        recipient_prekey: recipient_prekey.as_ref(),
+        registration_id,
+    };
+    x3dh::build_initial_session(&params).map_err(|e| Error::from_reason(e))
+}
+
+// ── ratchet ──
+
+#[napi]
+pub fn ratchet_encrypt(
+    session_json: String,
+    plaintext: Buffer,
+    our_identity_pub: Buffer,
+    remote_identity_pub: Buffer,
+) -> Result<String> {
+    let result = ratchet::encrypt(
+        &session_json,
+        plaintext.as_ref(),
+        our_identity_pub.as_ref(),
+        remote_identity_pub.as_ref(),
+    )
+    .map_err(|e| Error::from_reason(e))?;
+    serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+#[napi]
+pub fn ratchet_decrypt_whisper(
+    session_json: String,
+    ciphertext: Buffer,
+    our_identity_pub: Buffer,
+) -> Result<String> {
+    let result = ratchet::decrypt_whisper(
+        &session_json,
+        ciphertext.as_ref(),
+        our_identity_pub.as_ref(),
+    )
+    .map_err(|e| Error::from_reason(e))?;
+    serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+#[napi]
+pub fn ratchet_decrypt_pkmsg(
+    session_json: String,
+    ciphertext: Buffer,
+    our_identity_pub: Buffer,
+) -> Result<String> {
+    let result = ratchet::decrypt_pkmsg(
+        &session_json,
+        ciphertext.as_ref(),
+        our_identity_pub.as_ref(),
+    )
+    .map_err(|e| Error::from_reason(e))?;
+    serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
+}

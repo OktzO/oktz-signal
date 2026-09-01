@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 // X3DH initiator session build (libsignal v6 wire-compatible).
 // Info strings: "WhisperText" (root key) and "WhisperRatchet" (sending ratchet).
 // Shared secret layout: 0xff*32 || a1 || a2 || a3 [|| a4].

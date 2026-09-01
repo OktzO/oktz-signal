@@ -126,9 +126,11 @@ fn fill_message_keys(chain: &mut Chain, counter: i64) -> Result<(), String> {
 }
 
 // DH ratchet step: only when no chain exists for the remote ephemeral key.
-//   shared = scalar_multiply(current_ratchet_priv, remoteKey)
-//   mk = deriveSecrets(shared, rootKey, "WhisperRatchet", 2)  // 2 chunks
-//   rootKey = mk[0]; new ratchet keypair; receiving chain key = mk[1].
+// Mirrors libsignal maybeStepRatchet (session_cipher.js):
+//   1. Close previous receiving chain (if any): fill to previousCounter, drop key.
+//   2. receiving chain from current_ratchet_priv x remoteKey (rootKey update).
+//   3. Swap ephemeral keypair to a fresh key; previousCounter = old sending chain counter.
+//   4. sending chain from new_ratchet_priv x remoteKey (rootKey update).
 fn maybe_step_ratchet(
     entry: &mut SessionEntry,
     remote_key_b64: &str,
@@ -138,13 +140,44 @@ fn maybe_step_ratchet(
         return Ok(());
     }
     let remote_key = crate::util::unb64(remote_key_b64)?;
+
+    // 1. Close previous receiving chain (keyed by lastRemoteEphemeralKey).
+    if !entry.currentRatchet.lastRemoteEphemeralKey.is_empty() {
+        let prev_b64 = entry.currentRatchet.lastRemoteEphemeralKey.clone();
+        if let Some(prev_chain) = entry.chains.get_mut(&prev_b64) {
+            if prev_chain.chainType == 0 {
+                fill_message_keys(prev_chain, previous_counter as i64)?;
+                prev_chain.chainKey.key = String::new(); // closed
+            }
+        }
+    }
+
+    // 2. Receiving chain.
     let ratchet_priv = crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.privKey)?;
     let shared = curve::scalar_multiply(&ratchet_priv, &remote_key)?;
     let root_key = crate::util::unb64(&entry.currentRatchet.rootKey)?;
-    let mk = derive_secrets_n(&shared, &root_key, b"WhisperRatchet", 2)?;
+    let mk_recv = derive_secrets_n(&shared, &root_key, b"WhisperRatchet", 2)?;
+    entry.currentRatchet.rootKey = crate::util::b64(&mk_recv[0]);
 
-    entry.currentRatchet.rootKey = crate::util::b64(&mk[0]);
+    entry.chains.insert(
+        remote_key_b64.to_string(),
+        Chain {
+            chainKey: ChainKey {
+                counter: -1,
+                key: crate::util::b64(&mk_recv[1]),
+            },
+            chainType: 0, // RECEIVING
+            messageKeys: BTreeMap::new(),
+        },
+    );
 
+    // 3. Swap ephemeral keypair; delete old sending chain, snapshot its counter.
+    let old_eph_pub = entry.currentRatchet.ephemeralKeyPair.pubKey.clone();
+    if let Some(old_send) = entry.chains.remove(&old_eph_pub) {
+        if old_send.chainType == 1 {
+            entry.currentRatchet.previousCounter = old_send.chainKey.counter.max(0) as u32;
+        }
+    }
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     let (new_pub, new_priv) = curve::generate_keypair(&seed)?;
@@ -153,16 +186,21 @@ fn maybe_step_ratchet(
         privKey: crate::util::b64(&new_priv),
     };
     entry.currentRatchet.lastRemoteEphemeralKey = remote_key_b64.to_string();
-    entry.currentRatchet.previousCounter = previous_counter;
+
+    // 4. Sending chain: DH(new_priv, remoteKey) with the updated root key.
+    let shared_send = curve::scalar_multiply(&new_priv, &remote_key)?;
+    let root_send = crate::util::unb64(&entry.currentRatchet.rootKey)?;
+    let mk_send = derive_secrets_n(&shared_send, &root_send, b"WhisperRatchet", 2)?;
+    entry.currentRatchet.rootKey = crate::util::b64(&mk_send[0]);
 
     entry.chains.insert(
-        remote_key_b64.to_string(),
+        crate::util::b64(&new_pub),
         Chain {
             chainKey: ChainKey {
                 counter: -1,
-                key: crate::util::b64(&mk[1]),
+                key: crate::util::b64(&mk_send[1]),
             },
-            chainType: 0, // RECEIVING
+            chainType: 1, // SENDING
             messageKeys: BTreeMap::new(),
         },
     );
@@ -184,11 +222,14 @@ pub struct DecryptResult {
 
 /// Double Ratchet encrypt (v6 oracle wire format).
 /// result = [0x33] || WhisperMessage(ephemeralKey, counter, previousCounter, ct) || MAC[0..8]
+/// If pendingPreKey is set, wraps as PreKeyWhisperMessage (message_type=3, ciphertext =
+/// [0x33] || encode_pkmsg). pendingPreKey persists until first decrypt (oracle behavior).
 pub fn encrypt(
     session_json: &str,
     plaintext: &[u8],
     our_identity_pub: &[u8],    // 33 bytes, sender identity
     remote_identity_pub: &[u8], // 33 bytes, recipient identity
+    our_registration_id: u32,   // sender's own registration ID (for PKMsg)
 ) -> Result<EncryptResult, String> {
     let mut record: SessionRecord = session::deserialize(session_json)?;
     let entry = record
@@ -241,7 +282,28 @@ pub fn encrypt(
     result.extend_from_slice(&msg_buf);
     result.extend_from_slice(&mac[..8]);
 
+    let pending = entry.pendingPreKey.clone();
     let session_json = session::serialize(&record)?;
+
+    if let Some(pk) = pending {
+        let pkmsg = proto::PreKeyWhisperMessage {
+            pre_key_id: pk.preKeyId,
+            base_key: crate::util::unb64(&pk.baseKey)?,
+            identity_key: our_identity_pub.to_vec(),
+            message: result.clone(),
+            registration_id: our_registration_id,
+            signed_pre_key_id: pk.signedKeyId,
+        };
+        let pk_bytes = proto::encode_pkmsg(&pkmsg)?;
+        let mut wrapped = Vec::with_capacity(1 + pk_bytes.len());
+        wrapped.push(0x33);
+        wrapped.extend_from_slice(&pk_bytes);
+        return Ok(EncryptResult {
+            session_json,
+            message_type: 3,
+            ciphertext: wrapped,
+        });
+    }
     Ok(EncryptResult {
         session_json,
         message_type: 1,
@@ -368,9 +430,17 @@ mod tests {
             recipient_pub: &bob_identity,
             recipient_prekey: &spk,
             registration_id: 42,
+            signed_key_id: 1,
         };
         let fixed_eph = [0x55u8; 32];
-        let alice = x3dh::build_initial_session_with_ephemeral(&params, &fixed_eph).unwrap();
+        let mut alice = x3dh::build_initial_session_with_ephemeral(&params, &fixed_eph).unwrap();
+        // Clear pendingPreKey so bare-ratchet tests exercise the WhisperMessage
+        // path (type 1). Type-3 PKMsg wrapping is tested separately.
+        let mut alice_record = session::deserialize(&alice).unwrap();
+        for entry in alice_record.sessions.values_mut() {
+            entry.pendingPreKey = None;
+        }
+        alice = session::serialize(&alice_record).unwrap();
         let bob = build_bob_session(&alice, &alice_identity);
         (alice, bob, alice_identity, bob_identity)
     }
@@ -440,7 +510,7 @@ mod tests {
         let (alice, bob, alice_id, bob_id) = build_pair();
         let plaintext = b"hello signal";
 
-        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id).unwrap();
+        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         assert_eq!(enc.message_type, 1);
         assert_eq!(enc.ciphertext[0], 0x33, "version byte");
         assert!(enc.ciphertext.len() >= 1 + 8, "version + msgBuf + 8B mac");
@@ -461,7 +531,7 @@ mod tests {
             .collect();
 
         for (i, m) in msgs.iter().enumerate() {
-            let enc = encrypt(&alice, m, &alice_id, &bob_id).unwrap();
+            let enc = encrypt(&alice, m, &alice_id, &bob_id, 42).unwrap();
             alice = enc.session_json;
             let dec = decrypt_whisper(&bob, &enc.ciphertext, &bob_id).unwrap();
             bob = dec.session_json;
@@ -480,7 +550,7 @@ mod tests {
         let (alice, bob, alice_id, bob_id) = build_pair();
         let plaintext = b"integrity check";
 
-        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id).unwrap();
+        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         let mut tampered = enc.ciphertext.clone();
         let last = tampered.len() - 1;
         tampered[last] ^= 0x01;
@@ -500,13 +570,13 @@ mod tests {
     fn test_chain_key_advances() {
         let (alice, _, alice_id, bob_id) = build_pair();
 
-        let enc1 = encrypt(&alice, b"first", &alice_id, &bob_id).unwrap();
+        let enc1 = encrypt(&alice, b"first", &alice_id, &bob_id, 42).unwrap();
         let rec1: SessionRecord = session::deserialize(&enc1.session_json).unwrap();
         let e1 = rec1.sessions.values().next().unwrap();
         let c1 = e1.chains.values().find(|c| c.chainType == 1).unwrap();
         assert_eq!(c1.chainKey.counter, 0);
 
-        let enc2 = encrypt(&enc1.session_json, b"second", &alice_id, &bob_id).unwrap();
+        let enc2 = encrypt(&enc1.session_json, b"second", &alice_id, &bob_id, 42).unwrap();
         let rec2: SessionRecord = session::deserialize(&enc2.session_json).unwrap();
         let e2 = rec2.sessions.values().next().unwrap();
         let c2 = e2.chains.values().find(|c| c.chainType == 1).unwrap();
@@ -518,7 +588,7 @@ mod tests {
         let (alice, bob, alice_id, bob_id) = build_pair();
         let plaintext = b"pkmsg payload";
 
-        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id).unwrap();
+let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         let pkmsg = proto::PreKeyWhisperMessage {
             pre_key_id: Some(123),
             base_key: vec![0x01; 32],
@@ -539,7 +609,7 @@ mod tests {
     fn test_decrypt_pkmsg_no_session_fails() {
         let (alice, _, alice_id, bob_id) = build_pair();
         let plaintext = b"pkmsg payload";
-        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id).unwrap();
+        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         let pkmsg = proto::PreKeyWhisperMessage {
             pre_key_id: Some(123),
             base_key: vec![0x01; 32],
@@ -575,12 +645,14 @@ mod tests {
             recipient_pub: &identity,
             recipient_prekey: &spk,
             registration_id: 42,
+            signed_key_id: 1,
         };
         let fixed_eph = [0x55u8; 32];
         let alice = x3dh::build_initial_session_with_ephemeral(&params, &fixed_eph).unwrap();
 
         let mut record = session::deserialize(&alice).unwrap();
         let entry = record.sessions.values_mut().next().unwrap();
+        entry.pendingPreKey = None; // bare-ratchet self test (no type-3 wrap)
         let eph_pub = entry.currentRatchet.ephemeralKeyPair.pubKey.clone();
         let send_chain = entry.chains.remove(&eph_pub).unwrap();
         let recv_chain = Chain {
@@ -593,8 +665,116 @@ mod tests {
         let self_session = session::serialize(&record).unwrap();
 
         let plaintext = b"self roundtrip";
-        let enc = encrypt(&self_session, plaintext, &identity, &identity).unwrap();
+        let enc = encrypt(&self_session, plaintext, &identity, &identity, 42).unwrap();
         let dec = decrypt_whisper(&self_session, &enc.ciphertext, &identity).unwrap();
         assert_eq!(dec.plaintext, plaintext);
+    }
+
+    #[test]
+    fn test_full_x3dh_roundtrip_with_recipient_session() {
+        // Alice initiates X3DH, Bob builds session as recipient from the wire
+        // message. Alice's first message is type-3 (pendingPreKey set). Bob
+        // decrypts it (sending chain created by ratchet step) and replies.
+        let (alice, bob, alice_id, bob_id) = build_handshake(None);
+
+        // Alice's first message → type 3 (PreKeyWhisperMessage).
+        let enc1 = encrypt(&alice, b"first", &alice_id, &bob_id, 42).unwrap();
+        assert_eq!(enc1.message_type, 3, "first message wraps as PKMsg");
+        assert_eq!(enc1.ciphertext[0], 0x33);
+
+        // Bob decrypts the PKMsg directly (enc1.ciphertext is [0x33] || pkmsg).
+        let dec1 = decrypt_pkmsg(&bob, &enc1.ciphertext, &bob_id).unwrap();
+        assert_eq!(dec1.plaintext, b"first");
+
+        // Bob's session now has a sending chain (created by ratchet step).
+        let bob_rec: SessionRecord = session::deserialize(&dec1.session_json).unwrap();
+        let bob_entry = bob_rec.sessions.values().next().unwrap();
+        assert!(
+            bob_entry.chains.values().any(|c| c.chainType == 1),
+            "recipient must have a sending chain after first decrypt"
+        );
+        // And a receiving chain.
+        assert!(
+            bob_entry.chains.values().any(|c| c.chainType == 0),
+            "recipient must have a receiving chain after first decrypt"
+        );
+
+        // Bob replies → type 1 (no pendingPreKey on recipient).
+        let enc2 = encrypt(&dec1.session_json, b"reply", &bob_id, &alice_id, 42).unwrap();
+        assert_eq!(enc2.message_type, 1, "recipient reply is plain WhisperMessage");
+
+        // Alice decrypts the reply — her pendingPreKey is now cleared.
+        let dec2 = decrypt_whisper(&enc1.session_json, &enc2.ciphertext, &alice_id).unwrap();
+        assert_eq!(dec2.plaintext, b"reply");
+        let alice_rec: SessionRecord = session::deserialize(&dec2.session_json).unwrap();
+        let alice_entry = alice_rec.sessions.values().next().unwrap();
+        assert!(alice_entry.pendingPreKey.is_none(), "pendingPreKey cleared on decrypt");
+    }
+
+    #[test]
+    fn test_full_x3dh_roundtrip_with_one_time_prekey() {
+        // Same as above, but Alice uses Bob's one-time prekey (DH4 in X3DH).
+        let opk_priv = [0x99u8; 32];
+        let (alice, bob, alice_id, bob_id) = build_handshake(Some(opk_priv));
+
+        let enc1 = encrypt(&alice, b"opk first", &alice_id, &bob_id, 42).unwrap();
+        assert_eq!(enc1.message_type, 3);
+        let dec1 = decrypt_pkmsg(&bob, &enc1.ciphertext, &bob_id).unwrap();
+        assert_eq!(dec1.plaintext, b"opk first");
+
+        let enc2 = encrypt(&dec1.session_json, b"opk reply", &bob_id, &alice_id, 42).unwrap();
+        let dec2 = decrypt_whisper(&enc1.session_json, &enc2.ciphertext, &alice_id).unwrap();
+        assert_eq!(dec2.plaintext, b"opk reply");
+    }
+
+    // Build Alice (initiator) + Bob (recipient) sessions via real X3DH paths.
+    // Returns (alice, bob, alice_id, bob_id).
+    fn build_handshake(opk_priv: Option<[u8; 32]>) -> (String, String, Vec<u8>, Vec<u8>) {
+        let alice_sk = [0x42u8; 32];
+        let bob_sk = [0x77u8; 32];
+        let (alice_pk32, _) = curve::generate_keypair(&alice_sk).unwrap();
+        let (bob_pk32, bob_sk2) = curve::generate_keypair(&bob_sk).unwrap();
+        let mut alice_id = vec![0x05u8];
+        alice_id.extend_from_slice(&alice_pk32);
+        let mut bob_id = vec![0x05u8];
+        bob_id.extend_from_slice(&bob_pk32);
+
+        let spk_priv = [0x43u8; 32];
+        let (spk_pub, _) = curve::generate_keypair(&spk_priv).unwrap();
+        let sig = curve::sign(&bob_sk, &spk_pub, None).unwrap();
+
+        let fixed_eph = [0x55u8; 32];
+        let (eph_pub, _) = curve::generate_keypair(&fixed_eph).unwrap();
+
+        // One-time prekey (optional).
+        let opk_seed = [0x99u8; 32];
+        let (opk_pub, _) = curve::generate_keypair(&opk_seed).unwrap();
+        let use_opk = opk_priv.is_some();
+
+        let params = x3dh::X3dhParams {
+            identity_priv: &alice_sk,
+            identity_pub: &alice_id,
+            signed_prekey_pub: &spk_pub,
+            signed_prekey_sig: &sig,
+            prekey_pub: if use_opk { Some(&opk_pub) } else { None },
+            prekey_id: if use_opk { Some(7) } else { None },
+            recipient_pub: &bob_id,
+            recipient_prekey: &spk_pub,
+            registration_id: 42,
+            signed_key_id: 4,
+        };
+        let alice = x3dh::build_initial_session_with_ephemeral(&params, &fixed_eph).unwrap();
+
+        let bob = x3dh::build_recipient_session(
+            &bob_sk2,
+            &spk_priv,
+            &spk_pub,
+            if use_opk { Some(&opk_seed) } else { None },
+            &alice_id,
+            &eph_pub,
+            42,
+        )
+        .unwrap();
+        (alice, bob, alice_id, bob_id)
     }
 }

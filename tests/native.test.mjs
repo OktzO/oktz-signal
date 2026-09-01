@@ -122,6 +122,7 @@ const FIXTURE = readFileSync(
     recipientPub,
     recipientPrekey,
     42,    // registrationId
+    1,     // signedKeyId
   );
   ok(typeof sessionJson === 'string');
   const session = JSON.parse(sessionJson);
@@ -152,17 +153,19 @@ const FIXTURE = readFileSync(
     identityPriv, identityPub,
     signedPrekeyPub, sig,
     null, null,
-    recipientPub, recipientPrekey, 42,
+    recipientPub, recipientPrekey, 42, 1,
   );
 
   const plaintext = Buffer.from('hello signal');
   const encResult = JSON.parse(
-    n.ratchetEncrypt(sessionJson, plaintext, identityPub, recipientPub)
+    n.ratchetEncrypt(sessionJson, plaintext, identityPub, recipientPub, 42)
   );
   ok(encResult.session_json, 'has session_json');
   ok(encResult.ciphertext, 'has ciphertext');
   ok(typeof encResult.message_type === 'number');
   ok(encResult.ciphertext.length > 0);
+  // Initiator session carries pendingPreKey → first message is type 3.
+  strictEqual(encResult.message_type, 3, 'first message wraps as PKMsg');
 
   // decrypt_whisper and decrypt_pkmsg exist and are callable
   ok(typeof n.ratchetDecryptWhisper === 'function');

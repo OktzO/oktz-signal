@@ -20,6 +20,8 @@ export class SessionCipher {
       const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
       const sessionJson = session.serialize();
       const parsed = JSON.parse(sessionJson);
+      // Assumes a single open session per address (v6 keeps one; full session
+      // selection/archiving is a later task).
       const entry = Object.values(parsed._sessions)[0];
       const remoteIdentityPub = Buffer.from(entry.indexInfo.remoteIdentityKey, 'base64');
       const result = JSON.parse(native.ratchetEncrypt(

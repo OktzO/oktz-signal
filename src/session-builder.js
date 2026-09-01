@@ -22,29 +22,11 @@ export class SessionBuilder {
       const sessionJson = native.x3DhBuildInitialSession(
         Buffer.from(identity.privKey),
         Buffer.from(identity.pubKey),
-        Buffer.from(device.signedPreKey.publicKey),
-        Buffer.from(device.signedPreKey.signature),
-        device.preKey ? Buffer.from(device.preKey.publicKey) : null,
-        device.preKey ? (device.preKey.keyId != null ? device.preKey.keyId : null) : null,
-        Buffer.from(recipientKey),
-        Buffer.from(device.signedPreKey.publicKey),
-        regId
-      );
-      await this.storage.storeSession(this.addr.toString(), new SessionRecord(sessionJson));
-    });
-  }
-
-  async initOutgoingPreKey(device) {
-    return this._queue.add(this.addr.toString(), async () => {
-      const identity = await this.storage.getOurIdentity();
-      const regId = await this.storage.getOurRegistrationId();
-      const signedPreKey = await this.storage.loadSignedPreKey();
-      const recipientKey = device.identityKey;
-      if (!recipientKey) throw new Error('No identity key for recipient');
-
-      const sessionJson = native.x3DhBuildInitialSession(
-        Buffer.from(identity.privKey),
-        Buffer.from(identity.pubKey),
+        // Initiator X3DH: recipient signed prekey serves as both signed_prekey_pub
+        // (3rd arg, SPK_B used for DH and sig verification) and recipient_prekey
+        // (8th arg, DH base). Native verifies sig against recipient_pub (7th arg =
+        // device.identityKey) via curve::verify(recipient_pub, signed_prekey_pub,
+        // signed_prekey_sig) — same value in both positions is correct here.
         Buffer.from(device.signedPreKey.publicKey),
         Buffer.from(device.signedPreKey.signature),
         device.preKey ? Buffer.from(device.preKey.publicKey) : null,

@@ -15,6 +15,11 @@ describe('JS wrapper', () => {
   it('ProtocolAddress toString', () => {
     assert.strictEqual(new ProtocolAddress('user', 1).toString(), 'user.1');
   });
+  it('ProtocolAddress fromString', () => {
+    const addr = ProtocolAddress.fromString('user.1');
+    assert.strictEqual(addr.name, 'user');
+    assert.strictEqual(addr.deviceId, 1);
+  });
   it('crypto encrypt/decrypt roundtrip', async () => {
     const { encrypt, decrypt } = await import('../src/crypto.js');
     const key = Buffer.alloc(32, 0xAB);

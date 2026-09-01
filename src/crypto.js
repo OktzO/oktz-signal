@@ -38,12 +38,12 @@ export function deriveSecrets(input, salt, info, chunks = 3) {
   infoArray[infoArray.length - 1] = 1;
   const signed = [calculateMAC(PRK, Buffer.from(infoArray.slice(32)))];
   if (chunks > 1) {
-    infoArray.set(signed[signed.length - 1]);
+    infoArray.set(signed[signed.length - 1], 0);
     infoArray[infoArray.length - 1] = 2;
     signed.push(calculateMAC(PRK, Buffer.from(infoArray)));
   }
   if (chunks > 2) {
-    infoArray.set(signed[signed.length - 1]);
+    infoArray.set(signed[signed.length - 1], 0);
     infoArray[infoArray.length - 1] = 3;
     signed.push(calculateMAC(PRK, Buffer.from(infoArray)));
   }

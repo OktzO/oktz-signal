@@ -202,3 +202,29 @@ pub fn ratchet_decrypt_pkmsg(
     .map_err(|e| Error::from_reason(e))?;
     serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
 }
+#[napi]
+pub fn test_derive(input: Buffer, salt: Buffer, info: Buffer, n: u32) -> Result<Vec<String>> {
+    let chunks = ratchet::derive_secrets_n(input.as_ref(), salt.as_ref(), info.as_ref(), n as usize)
+        .map_err(|e| Error::from_reason(e))?;
+    Ok(chunks.iter().map(|c| crate::util::b64(c)).collect())
+}
+
+#[napi]
+pub fn test_step_ratchet(session_json: String, remote_key_b64: String, previous_counter: u32) -> Result<String> {
+    let mut record = session::deserialize(&session_json).map_err(|e| Error::from_reason(e))?;
+    let entry = record.sessions.values_mut().next().ok_or_else(|| Error::from_reason("no entry"))?;
+    let remote_key = crate::util::unb64(&remote_key_b64).map_err(|e| Error::from_reason(e))?;
+    let ratchet_priv = crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.privKey).map_err(|e| Error::from_reason(e))?;
+    let shared = curve::scalar_multiply(&ratchet_priv, &remote_key).map_err(|e| Error::from_reason(e))?;
+    let root_key = crate::util::unb64(&entry.currentRatchet.rootKey).map_err(|e| Error::from_reason(e))?;
+    let mk = ratchet::derive_secrets_n(&shared, &root_key, b"WhisperRatchet", 2).map_err(|e| Error::from_reason(e))?;
+    let shared_b64 = crate::util::b64(&shared);
+    let root_b64 = crate::util::b64(&root_key);
+    let chain_b64 = crate::util::b64(&mk[1]);
+    ratchet::maybe_step_ratchet(entry, &remote_key_b64, previous_counter).map_err(|e| Error::from_reason(e))?;
+    let mut chains = Vec::new();
+    for (k, c) in &entry.chains {
+        chains.push(format!("{}:type={}:key={}", k, c.chainType, c.chainKey.key));
+    }
+    Ok(format!("shared={}\nroot={}\nchain={}\n{}", shared_b64, root_b64, chain_b64, chains.join("\n")))
+}

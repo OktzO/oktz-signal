@@ -77,7 +77,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 // N-chunk HKDF (RFC 5869 Extract-then-Expand) — same as libsignal deriveSecrets.
-fn derive_secrets_n(input: &[u8], salt: &[u8], info: &[u8], n: usize) -> Result<Vec<Vec<u8>>, String> {
+pub(crate) fn derive_secrets_n(input: &[u8], salt: &[u8], info: &[u8], n: usize) -> Result<Vec<Vec<u8>>, String> {
     let prk = {
         let mut mac = <HmacSha256 as Mac>::new_from_slice(salt).map_err(|e| e.to_string())?;
         mac.update(input);
@@ -131,7 +131,7 @@ fn fill_message_keys(chain: &mut Chain, counter: i64) -> Result<(), String> {
 //   2. receiving chain from current_ratchet_priv x remoteKey (rootKey update).
 //   3. Swap ephemeral keypair to a fresh key; previousCounter = old sending chain counter.
 //   4. sending chain from new_ratchet_priv x remoteKey (rootKey update).
-fn maybe_step_ratchet(
+pub(crate) fn maybe_step_ratchet(
     entry: &mut SessionEntry,
     remote_key_b64: &str,
     previous_counter: u32,

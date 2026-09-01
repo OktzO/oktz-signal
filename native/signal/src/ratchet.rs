@@ -331,7 +331,16 @@ pub fn decrypt_whisper(
         .next()
         .ok_or("no session entry")?;
 
-    let chain_id = crate::util::b64(&msg.ephemeral_key);
+    // Real WhatsApp ephemeral keys are 33 bytes (0x05 prefix) in WhisperMessage.
+    // Strip to 32-byte X25519 — scalar_multiply + chain lookup expect 32 bytes.
+    // (JS wrapper strips base_key the same way when building recipient session.)
+    let eph_key = if msg.ephemeral_key.len() == 33 && msg.ephemeral_key[0] == 0x05 {
+        &msg.ephemeral_key[1..]
+    } else {
+        msg.ephemeral_key.as_slice()
+    };
+
+    let chain_id = crate::util::b64(eph_key);
     maybe_step_ratchet(entry, &chain_id, msg.previous_counter)?;
 
     let mut chain = entry

@@ -4,6 +4,7 @@ const native = require('../native/signal/index.cjs');
 import { QueueJob } from './queue-job.js';
 import { SessionRecord } from './session-record.js';
 import { NoSessionError } from './errors.js';
+import { SessionBuilder } from './session-builder.js';
 
 export class SessionCipher {
   constructor(storage, addr) {
@@ -17,15 +18,14 @@ export class SessionCipher {
       const session = await this.storage.loadSession(this.addr.toString());
       if (!session) throw new NoSessionError('no session');
       const ourIdentity = await this.storage.getOurIdentity();
+      const ourRegistrationId = await this.storage.getOurRegistrationId();
       const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
       const sessionJson = session.serialize();
       const parsed = JSON.parse(sessionJson);
-      // Assumes a single open session per address (v6 keeps one; full session
-      // selection/archiving is a later task).
       const entry = Object.values(parsed._sessions)[0];
       const remoteIdentityPub = Buffer.from(entry.indexInfo.remoteIdentityKey, 'base64');
       const result = JSON.parse(native.ratchetEncrypt(
-        sessionJson, Buffer.from(data), ourIdentityPub, remoteIdentityPub
+        sessionJson, Buffer.from(data), ourIdentityPub, remoteIdentityPub, ourRegistrationId
       ));
       const newSession = new SessionRecord(result.session_json);
       await this.storage.storeSession(this.addr.toString(), newSession);
@@ -50,12 +50,24 @@ export class SessionCipher {
 
   async decryptPreKeyWhisperMessage(ciphertext) {
     return this._queue.add(this.addr.toString(), async () => {
-      const session = await this.storage.loadSession(this.addr.toString());
+      let session = await this.storage.loadSession(this.addr.toString());
       const sessionJson = session ? session.serialize() : '{}';
       const ourIdentity = await this.storage.getOurIdentity();
       const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
+
+      // Try native decrypt first — if an open session exists, it works.
+      // If no open session, build recipient session via initIncoming first.
+      if (!session || !session.haveOpenSession()) {
+        const pkmsg = JSON.parse(native.protoDecodePkmsg(
+          Buffer.from(ciphertext.slice(1))
+        ));
+        const builder = new SessionBuilder(this.storage, this.addr);
+        session = await builder.initIncoming(session || {}, pkmsg);
+        await this.storage.storeSession(this.addr.toString(), session);
+      }
+
       const result = JSON.parse(native.ratchetDecryptPkmsg(
-        sessionJson, Buffer.from(ciphertext), ourIdentityPub
+        session.serialize(), Buffer.from(ciphertext), ourIdentityPub
       ));
       const newSession = new SessionRecord(result.session_json);
       await this.storage.storeSession(this.addr.toString(), newSession);

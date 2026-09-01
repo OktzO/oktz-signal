@@ -113,6 +113,7 @@ pub fn x3dh_build_initial_session(
     recipient_pub: Buffer,
     recipient_prekey: Buffer,
     registration_id: u32,
+    signed_key_id: u32,
 ) -> Result<String> {
     let params = x3dh::X3dhParams {
         identity_priv: identity_priv.as_ref(),
@@ -124,8 +125,31 @@ pub fn x3dh_build_initial_session(
         recipient_pub: recipient_pub.as_ref(),
         recipient_prekey: recipient_prekey.as_ref(),
         registration_id,
+        signed_key_id,
     };
     x3dh::build_initial_session(&params).map_err(|e| Error::from_reason(e))
+}
+
+#[napi]
+pub fn x3dh_build_recipient_session(
+    our_identity_priv: Buffer,
+    our_signed_prekey_priv: Buffer,
+    our_signed_prekey_pub: Buffer,
+    our_prekey_priv: Option<Buffer>,
+    sender_identity: Buffer,
+    sender_ephemeral: Buffer,
+    registration_id: u32,
+) -> Result<String> {
+    x3dh::build_recipient_session(
+        our_identity_priv.as_ref(),
+        our_signed_prekey_priv.as_ref(),
+        our_signed_prekey_pub.as_ref(),
+        our_prekey_priv.as_ref().map(|b| b.as_ref()),
+        sender_identity.as_ref(),
+        sender_ephemeral.as_ref(),
+        registration_id,
+    )
+    .map_err(|e| Error::from_reason(e))
 }
 
 // ── ratchet ──
@@ -136,12 +160,14 @@ pub fn ratchet_encrypt(
     plaintext: Buffer,
     our_identity_pub: Buffer,
     remote_identity_pub: Buffer,
+    our_registration_id: u32,
 ) -> Result<String> {
     let result = ratchet::encrypt(
         &session_json,
         plaintext.as_ref(),
         our_identity_pub.as_ref(),
         remote_identity_pub.as_ref(),
+        our_registration_id,
     )
     .map_err(|e| Error::from_reason(e))?;
     serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))

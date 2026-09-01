@@ -61,6 +61,10 @@ pub struct ChainKey {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PendingPreKey {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signedKeyId: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preKeyId: Option<u32>,
     pub baseKey: String,
 }
 

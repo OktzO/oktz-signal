@@ -197,35 +197,19 @@ describe('protocol oracle: oktz-signal → libsignal interop', () => {
       alicePriv, alicePub33,
       spkPub, spkSig,
       opkPub, 2, // prekeyPub, prekeyId
-      bobPub33, spkPub, 42
+      bobPub33, spkPub, 42, 1 // signed_key_id
     );
 
-    // 5. Encrypt with oktz-native
+    // 5. Encrypt with oktz-native — returns type 3 (PKMsg) since pendingPreKey set
     const plaintext = Buffer.from('hello from oktz-signal');
     const encResult = JSON.parse(native.ratchetEncrypt(
-      aliceSessionJson, plaintext, alicePub33, bobPub33
+      aliceSessionJson, plaintext, alicePub33, bobPub33, 42
     ));
+    assert.strictEqual(encResult.message_type, 3, 'first message must be type 3 (PKMsg)');
 
-    // oktz-native encrypt returns message_type 1 (whisper) without prekey wrapper
-    const ciphertext = Buffer.from(encResult.ciphertext);
-    assert.strictEqual(ciphertext[0], 0x33, 'version byte must be 0x33');
-
-    // 6. Wrap in PreKeyWhisperMessage proto for libsignal
-    const aliceParsed = JSON.parse(aliceSessionJson);
-    const aEntry = Object.values(aliceParsed._sessions)[0];
-    const baseKeyB64 = aEntry.indexInfo.baseKey;
-
-    const preKeyMsg = {
-      pre_key_id: 2,
-      base_key: [...Buffer.from(baseKeyB64, 'base64')],
-      identity_key: [...alicePub33],
-      message: [...ciphertext],
-      registration_id: 42,
-      signed_pre_key_id: 1,
-    };
-
-    const pkmsgWire = native.protoEncodePkmsg(JSON.stringify(preKeyMsg));
-    const fullWire = Buffer.concat([Buffer.from([0x33]), pkmsgWire]);
+    // encResult.ciphertext is already [0x33] || encode_pkmsg(PreKeyWhisperMessage)
+    // which is exactly what libsignal expects — pass it directly.
+    const fullWire = Buffer.from(encResult.ciphertext);
 
     // 7. Decrypt with libsignal SessionCipher via initIncoming
     let bobStored = null;

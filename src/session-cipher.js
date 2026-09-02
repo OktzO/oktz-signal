@@ -53,14 +53,25 @@ export class SessionCipher {
       const ourIdentity = await this.storage.getOurIdentity();
       const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
 
-      // Libsignal behavior: pkmsg always rebuilds session from message,
-      // regardless of existing session (preKeyProto contains init info).
+      // Libsignal behavior (session_builder.js initIncoming): if a session for
+      // this pkmsg's baseKey already exists, KEEP it ("this just means we
+      // haven't replied") and decrypt with that session — never rebuild and
+      // discard the established sending chain. Only build fresh when the
+      // baseKey is new to us.
       const pkmsg = JSON.parse(native.protoDecodePkmsg(
         Buffer.from(ciphertext.slice(1))
       ));
-      const builder = new SessionBuilder(this.storage, this.addr);
-      let session = await builder.initIncoming(null, pkmsg);
-      await this.storage.storeSession(this.addr.toString(), session);
+      const baseKeyRaw = Buffer.from(
+        pkmsg.base_key != null ? pkmsg.base_key : pkmsg.baseKey
+      );
+      const baseKey = strip05(baseKeyRaw).toString('base64');
+
+      let session = await this.storage.loadSession(this.addr.toString());
+      if (!session || !sessionHasBaseKey(session, baseKey)) {
+        const builder = new SessionBuilder(this.storage, this.addr);
+        session = await builder.initIncoming(null, pkmsg);
+        await this.storage.storeSession(this.addr.toString(), session);
+      }
 
       // Decrypt embedded WhisperMessage (handles ratchet step)
       const result = JSON.parse(native.ratchetDecryptPkmsg(
@@ -72,3 +83,21 @@ export class SessionCipher {
     });
   }
 }
+
+// Does the stored SessionRecord already hold an entry whose baseKey matches
+// `baseKeyB64`? Mirrors libsignal SessionRecord.getSession(baseKey) lookup.
+function sessionHasBaseKey(session, baseKeyB64) {
+  try {
+    const record = JSON.parse(session.serialize());
+    const entries = record._sessions || {};
+    return Object.values(entries).some(
+      (e) => e.indexInfo && e.indexInfo.baseKey === baseKeyB64
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Native X25519 expects 32-byte keys. Wire public keys are 33-byte
+// (0x05-prefixed); strip the prefix for internal 32-byte representation.
+const strip05 = (b) => (b.length === 33 && b[0] === 0x05 ? b.slice(1) : b);

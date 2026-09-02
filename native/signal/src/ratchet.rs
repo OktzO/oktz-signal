@@ -238,7 +238,17 @@ pub fn encrypt(
         .next()
         .ok_or("no session entry")?;
 
-    let ephemeral_key = crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.pubKey)?;
+    // Wire ephemeral keys are 33-byte (0x05 prefix) in WhisperMessage — same as
+    // libsignal curve.generateKeyPair (prefixKeyInPublicKey). Internal chain
+    // keys stay 32-byte; prefix only at the wire boundary.
+    let eph_pub = crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.pubKey)?;
+    let ephemeral_key = if eph_pub.len() == 32 {
+        let mut pk = vec![0x05u8];
+        pk.extend_from_slice(&eph_pub);
+        pk
+    } else {
+        eph_pub
+    };
     let previous_counter = entry.currentRatchet.previousCounter;
 
     let chain = entry
@@ -286,9 +296,17 @@ pub fn encrypt(
     let session_json = session::serialize(&record)?;
 
     if let Some(pk) = pending {
+        let pk_bk = crate::util::unb64(&pk.baseKey)?;
+        let base_key = if pk_bk.len() == 32 {
+            let mut b = vec![0x05u8];
+            b.extend_from_slice(&pk_bk);
+            b
+        } else {
+            pk_bk
+        };
         let pkmsg = proto::PreKeyWhisperMessage {
             pre_key_id: pk.preKeyId,
-            base_key: crate::util::unb64(&pk.baseKey)?,
+            base_key,
             identity_key: our_identity_pub.to_vec(),
             message: result.clone(),
             registration_id: our_registration_id,

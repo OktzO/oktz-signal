@@ -1,6 +1,6 @@
 {
   "name": "oktz-signal",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "description": "Signal protocol Rust native — MIT replacement for libsignal (GPL)",
   "main": "index.js",

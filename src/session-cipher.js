@@ -50,22 +50,19 @@ export class SessionCipher {
 
   async decryptPreKeyWhisperMessage(ciphertext) {
     return this._queue.add(this.addr.toString(), async () => {
-      let session = await this.storage.loadSession(this.addr.toString());
-      const sessionJson = session ? session.serialize() : '{}';
       const ourIdentity = await this.storage.getOurIdentity();
       const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
 
-      // Try native decrypt first — if an open session exists, it works.
-      // If no open session, build recipient session via initIncoming first.
-      if (!session || !session.haveOpenSession()) {
-        const pkmsg = JSON.parse(native.protoDecodePkmsg(
-          Buffer.from(ciphertext.slice(1))
-        ));
-        const builder = new SessionBuilder(this.storage, this.addr);
-        session = await builder.initIncoming(session || {}, pkmsg);
-        await this.storage.storeSession(this.addr.toString(), session);
-      }
+      // Libsignal behavior: pkmsg always rebuilds session from message,
+      // regardless of existing session (preKeyProto contains init info).
+      const pkmsg = JSON.parse(native.protoDecodePkmsg(
+        Buffer.from(ciphertext.slice(1))
+      ));
+      const builder = new SessionBuilder(this.storage, this.addr);
+      let session = await builder.initIncoming(null, pkmsg);
+      await this.storage.storeSession(this.addr.toString(), session);
 
+      // Decrypt embedded WhisperMessage (handles ratchet step)
       const result = JSON.parse(native.ratchetDecryptPkmsg(
         session.serialize(), Buffer.from(ciphertext), ourIdentityPub
       ));

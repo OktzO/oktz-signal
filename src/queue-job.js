@@ -6,10 +6,16 @@ export class QueueJob {
     let queue = this.queues.get(key);
     if (!queue) {
       queue = Promise.resolve();
-      this.queues.set(key, queue);
     }
-    queue = queue.then(fn, fn);
-    this.queues.set(key, queue);
-    return queue;
+    const run = queue.then(fn, fn);
+    this.queues.set(key, run);
+    run.catch(() => {}); // avoid unhandled rejection dari chain tersimpan
+    // kalau masih tail saat settle → tak ada follower → hapus entry.
+    // kalau add() lain replace entry sebelum settle, identitas beda → biarkan.
+    if (this.queues.get(key) === run) {
+      const cleanup = () => { if (this.queues.get(key) === run) this.queues.delete(key); };
+      run.then(cleanup, cleanup);
+    }
+    return run;
   }
 }

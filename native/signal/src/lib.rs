@@ -212,7 +212,7 @@ pub fn test_derive(input: Buffer, salt: Buffer, info: Buffer, n: u32) -> Result<
 #[napi]
 pub fn test_step_ratchet(session_json: String, remote_key_b64: String, previous_counter: u32) -> Result<String> {
     let mut record = session::deserialize(&session_json).map_err(|e| Error::from_reason(e))?;
-    let entry = record.sessions.values_mut().next().ok_or_else(|| Error::from_reason("no entry"))?;
+    let entry = session::current_session_mut(&mut record).ok_or_else(|| Error::from_reason("no entry"))?;
     let remote_key = crate::util::unb64(&remote_key_b64).map_err(|e| Error::from_reason(e))?;
     let ratchet_priv = crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.privKey).map_err(|e| Error::from_reason(e))?;
     let shared = curve::scalar_multiply(&ratchet_priv, &remote_key).map_err(|e| Error::from_reason(e))?;

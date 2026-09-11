@@ -84,6 +84,31 @@ pub fn have_open_session(record: &SessionRecord) -> bool {
     record.sessions.values().any(|s| s.indexInfo.closed == -1)
 }
 
+/// Select the ACTIVE session entry for encrypt/decrypt — mirrors libsignal
+/// `getOpenSession()` semantics: prefer the entry with `closed == -1`; among
+/// multiple open entries (shouldn't happen, but be robust) pick the most
+/// recently `used`. Fallback: the entry with the highest `used` (newest
+/// archived) so legacy single-entry and migrated records keep working.
+/// Returns `None` only when the record is empty.
+pub fn current_session_mut(record: &mut SessionRecord) -> Option<&mut SessionEntry> {
+    if record.sessions.is_empty() {
+        return None;
+    }
+    // Fast path: exactly one entry (the overwhelmingly common case).
+    if record.sessions.len() == 1 {
+        return record.sessions.values_mut().next();
+    }
+    let best_key = record
+        .sessions
+        .iter()
+        .max_by_key(|(_, s)| {
+            let open = s.indexInfo.closed == -1;
+            (open, s.indexInfo.used)
+        })
+        .map(|(k, _)| k.clone())?;
+    record.sessions.get_mut(&best_key)
+}
+
 pub fn archive_current(record: &mut SessionRecord) -> Result<(), String> {
     for session in record.sessions.values_mut() {
         if session.indexInfo.closed == -1 {

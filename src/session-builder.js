@@ -51,7 +51,20 @@ export class SessionBuilder {
     const identity = await this.storage.getOurIdentity();
     const preKeyId = message.pre_key_id != null ? message.pre_key_id : message.preKeyId;
     const preKeyPair = preKeyId != null ? await this.storage.loadPreKey(preKeyId) : null;
-    const signedPreKeyPair = await this.storage.loadSignedPreKey();
+    // Signed prekey lookup by ID when the pkmsg carries one (rotation support);
+    // fall back to argless loadSignedPreKey() for legacy callers. A mismatch
+    // (sender used a rotated-away SPK) surfaces as a clear error instead of a
+    // misleading MAC failure.
+    const signedPreKeyId = message.signed_pre_key_id != null
+      ? message.signed_pre_key_id
+      : message.signedPreKeyId;
+    let signedPreKeyPair = null;
+    if (signedPreKeyId != null && this.storage.loadSignedPreKey.length > 0) {
+      signedPreKeyPair = await this.storage.loadSignedPreKey(signedPreKeyId);
+    }
+    if (!signedPreKeyPair) {
+      signedPreKeyPair = await this.storage.loadSignedPreKey();
+    }
     if (!signedPreKeyPair) throw new Error('Missing SignedPreKey');
 
     const sessionJson = native.x3DhBuildRecipientSession(

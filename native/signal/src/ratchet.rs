@@ -232,10 +232,7 @@ pub fn encrypt(
     our_registration_id: u32,   // sender's own registration ID (for PKMsg)
 ) -> Result<EncryptResult, String> {
     let mut record: SessionRecord = session::deserialize(session_json)?;
-    let entry = record
-        .sessions
-        .values_mut()
-        .next()
+    let entry = session::current_session_mut(&mut record)
         .ok_or("no session entry")?;
 
     // Wire ephemeral keys are 33-byte (0x05 prefix) in WhisperMessage — same as
@@ -343,10 +340,7 @@ pub fn decrypt_whisper(
     let msg = proto::decode_whisper(msg_buf)?;
 
     let mut record: SessionRecord = session::deserialize(session_json)?;
-    let entry = record
-        .sessions
-        .values_mut()
-        .next()
+    let entry = session::current_session_mut(&mut record)
         .ok_or("no session entry")?;
 
     // Real WhatsApp ephemeral keys are 33 bytes (0x05 prefix) in WhisperMessage.

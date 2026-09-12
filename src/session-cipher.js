@@ -9,8 +9,8 @@ import { SessionBuilder } from './session-builder.js';
 // Select the ACTIVE session entry — mirrors libsignal getOpenSession():
 // prefer `closed === -1`, tie-break by most recently `used`. Falls back to
 // the newest entry so single-entry records (the common case) are unaffected.
-// Must match Rust `current_session_mut` (session.rs) — both sides now agree
-// on which entry is "current" even for multi-entry records.
+// Kept for API parity; hot paths use the native `current_session_mut`
+// (session.rs) directly, which implements the same selection.
 export function currentSessionEntry(parsed) {
   const entries = Object.values(parsed._sessions || {});
   if (entries.length <= 1) return entries[0];
@@ -22,51 +22,74 @@ export function currentSessionEntry(parsed) {
   });
 }
 
+// Native errors are plain strings; surface the "no session" family as
+// NoSessionError so callers can distinguish broken frames from missing state.
+function mapNativeError(e) {
+  const msg = e && e.message ? e.message : String(e);
+  if (/no session|no session entry|empty record/i.test(msg)) throw new NoSessionError(msg);
+  throw e;
+}
+
+// Queues are shared per (storage, addr) so two SessionCipher instances over
+// the same record can't interleave load/store and duplicate ratchet counters.
+const QUEUE_INDEX = new WeakMap(); // storage -> Map<addrKey, QueueJob>
+function sharedQueue(storage, addrKey) {
+  let byAddr = QUEUE_INDEX.get(storage);
+  if (!byAddr) QUEUE_INDEX.set(storage, (byAddr = new Map()));
+  let q = byAddr.get(addrKey);
+  if (!q) byAddr.set(addrKey, (q = new QueueJob()));
+  return q;
+}
+
 export class SessionCipher {
   constructor(storage, addr) {
     this.storage = storage;
     this.addr = addr;
-    this._queue = new QueueJob();
   }
 
   async encrypt(data) {
-    return this._queue.add(this.addr.toString(), async () => {
+    return sharedQueue(this.storage, this.addr.toString()).add(this.addr.toString(), async () => {
       const session = await this.storage.loadSession(this.addr.toString());
       if (!session) throw new NoSessionError('no session');
       const ourIdentity = await this.storage.getOurIdentity();
       const ourRegistrationId = await this.storage.getOurRegistrationId();
-      const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
-      const sessionJson = session.serialize();
-      const parsed = JSON.parse(sessionJson);
-      const entry = currentSessionEntry(parsed);
-      if (!entry) throw new NoSessionError('no session entry');
-      const remoteIdentityPub = Buffer.from(entry.indexInfo.remoteIdentityKey, 'base64');
-      const result = JSON.parse(native.ratchetEncrypt(
-        sessionJson, Buffer.from(data), ourIdentityPub, remoteIdentityPub, ourRegistrationId
-      ));
-      const newSession = new SessionRecord(result.session_json);
-      await this.storage.storeSession(this.addr.toString(), newSession);
-      return { type: result.message_type, body: Buffer.from(result.ciphertext) };
+      let result;
+      try {
+        // Remote identity + active-entry selection happen natively from the
+        // record itself — no per-message JSON.parse or extra boundary copy.
+        result = native.ratchetEncrypt(
+          session.serialize(), Buffer.from(data),
+          Buffer.from(ourIdentity.pubKey), ourRegistrationId
+        );
+      } catch (e) { mapNativeError(e); }
+      await this.storage.storeSession(
+        this.addr.toString(), new SessionRecord(result.sessionJson)
+      );
+      return { type: result.messageType, body: result.ciphertext };
     });
   }
 
   async decryptWhisperMessage(ciphertext) {
-    return this._queue.add(this.addr.toString(), async () => {
+    return sharedQueue(this.storage, this.addr.toString()).add(this.addr.toString(), async () => {
       const session = await this.storage.loadSession(this.addr.toString());
       if (!session) throw new NoSessionError('no session');
       const ourIdentity = await this.storage.getOurIdentity();
-      const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
-      const result = JSON.parse(native.ratchetDecryptWhisper(
-        session.serialize(), Buffer.from(ciphertext), ourIdentityPub
-      ));
-      const newSession = new SessionRecord(result.session_json);
-      await this.storage.storeSession(this.addr.toString(), newSession);
-      return Buffer.from(result.plaintext);
+      let result;
+      try {
+        result = native.ratchetDecryptWhisper(
+          session.serialize(), Buffer.from(ciphertext), Buffer.from(ourIdentity.pubKey)
+        );
+      } catch (e) { mapNativeError(e); }
+      await this.storage.storeSession(
+        this.addr.toString(), new SessionRecord(result.sessionJson)
+      );
+      return result.plaintext;
     });
   }
 
   async decryptPreKeyWhisperMessage(ciphertext) {
-    return this._queue.add(this.addr.toString(), async () => {
+    const addrKey = this.addr.toString();
+    return sharedQueue(this.storage, addrKey).add(addrKey, async () => {
       const ourIdentity = await this.storage.getOurIdentity();
       const ourIdentityPub = Buffer.from(ourIdentity.pubKey);
 
@@ -75,15 +98,11 @@ export class SessionCipher {
       // haven't replied") and decrypt with that session — never rebuild and
       // discard the established sending chain. Only build fresh when the
       // baseKey is new to us.
-      const pkmsg = JSON.parse(native.protoDecodePkmsg(
-        Buffer.from(ciphertext.slice(1))
-      ));
-      const baseKeyRaw = Buffer.from(
-        pkmsg.base_key != null ? pkmsg.base_key : pkmsg.baseKey
-      );
+      const pkmsg = native.protoDecodePkmsg(Buffer.from(ciphertext.subarray(1)));
+      const baseKeyRaw = pkmsg.baseKey ?? Buffer.alloc(0);
       const baseKey = strip05(baseKeyRaw).toString('base64');
 
-      let session = await this.storage.loadSession(this.addr.toString());
+      let session = await this.storage.loadSession(addrKey);
       if (!session || !sessionHasBaseKey(session, baseKey)) {
         const builder = new SessionBuilder(this.storage, this.addr);
         const fresh = await builder.initIncoming(null, pkmsg);
@@ -93,27 +112,28 @@ export class SessionCipher {
           // from the previous session stays decryptable, then the new entry is
           // merged into the same record.
           const merged = archiveAndMerge(session, fresh);
-          await this.storage.storeSession(this.addr.toString(), merged);
+          await this.storage.storeSession(addrKey, merged);
           session = merged;
         } else {
-          await this.storage.storeSession(this.addr.toString(), fresh);
+          await this.storage.storeSession(addrKey, fresh);
           session = fresh;
         }
         // One-time prekey is consumed (libsignal removes it after successful
         // initIncoming to prevent pkmsg replay from reusing the OPK).
-        const preKeyId = pkmsg.pre_key_id != null ? pkmsg.pre_key_id : pkmsg.preKeyId;
-        if (preKeyId != null && this.storage.removePreKey) {
-          try { await this.storage.removePreKey(preKeyId) } catch { /* best-effort */ }
+        if (pkmsg.preKeyId != null && this.storage.removePreKey) {
+          try { await this.storage.removePreKey(pkmsg.preKeyId) } catch { /* best-effort */ }
         }
       }
 
       // Decrypt embedded WhisperMessage (handles ratchet step)
-      const result = JSON.parse(native.ratchetDecryptPkmsg(
-        session.serialize(), Buffer.from(ciphertext), ourIdentityPub
-      ));
-      const newSession = new SessionRecord(result.session_json);
-      await this.storage.storeSession(this.addr.toString(), newSession);
-      return Buffer.from(result.plaintext);
+      let result;
+      try {
+        result = native.ratchetDecryptPkmsg(
+          session.serialize(), Buffer.from(ciphertext), ourIdentityPub
+        );
+      } catch (e) { mapNativeError(e); }
+      await this.storage.storeSession(addrKey, new SessionRecord(result.sessionJson));
+      return result.plaintext;
     });
   }
 }
@@ -153,4 +173,4 @@ function archiveAndMerge(oldRecord, freshRecord) {
 
 // Native X25519 expects 32-byte keys. Wire public keys are 33-byte
 // (0x05-prefixed); strip the prefix for internal 32-byte representation.
-const strip05 = (b) => (b.length === 33 && b[0] === 0x05 ? b.slice(1) : b);
+const strip05 = (b) => (b.length === 33 && b[0] === 0x05 ? b.subarray(1) : b);

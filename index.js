@@ -13,14 +13,14 @@ export * as crypto from './src/crypto.js';
 /** Decode PreKeyWhisperMessage wire format — API parity dengan libsignal protobufs */
 export const PreKeyWhisperMessage = {
   decode(bytes) {
-    const proto = JSON.parse(native.protoDecodePkmsg(Buffer.from(bytes)));
+    const proto = native.protoDecodePkmsg(Buffer.from(bytes));
     return {
-      identityKey: proto.identity_key ? Uint8Array.from(proto.identity_key) : undefined,
-      baseKey: proto.base_key ? Uint8Array.from(proto.base_key) : undefined,
-      message: proto.message ? Uint8Array.from(proto.message) : undefined,
-      registrationId: proto.registration_id,
-      preKeyId: proto.pre_key_id ?? undefined,
-      signedPreKeyId: proto.signed_pre_key_id ?? undefined,
+      identityKey: proto.identityKey,
+      baseKey: proto.baseKey,
+      message: proto.message,
+      registrationId: proto.registrationId,
+      preKeyId: proto.preKeyId ?? undefined,
+      signedPreKeyId: proto.signedPreKeyId ?? undefined,
     };
   },
 };

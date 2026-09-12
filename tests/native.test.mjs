@@ -67,10 +67,10 @@ const FIXTURE = readFileSync(
   const encoded = n.protoEncodeWhisper(eph, 42, 7, ct);
   ok(encoded instanceof Buffer);
 
-  const decoded = JSON.parse(n.protoDecodeWhisper(encoded));
-  deepStrictEqual(Buffer.from(decoded.ephemeral_key), eph);
+  const decoded = n.protoDecodeWhisper(encoded);
+  deepStrictEqual(Buffer.from(decoded.ephemeralKey), eph);
   strictEqual(decoded.counter, 42);
-  strictEqual(decoded.previous_counter, 7);
+  strictEqual(decoded.previousCounter, 7);
   deepStrictEqual(Buffer.from(decoded.ciphertext), ct);
 }
 
@@ -87,12 +87,12 @@ const FIXTURE = readFileSync(
   const encoded = n.protoEncodePkmsg(JSON.stringify(msg));
   ok(encoded instanceof Buffer);
 
-  const decoded = JSON.parse(n.protoDecodePkmsg(encoded));
-  strictEqual(decoded.registration_id, 555);
-  deepStrictEqual(Buffer.from(decoded.base_key), Buffer.from(msg.base_key));
-  deepStrictEqual(Buffer.from(decoded.identity_key), Buffer.from(msg.identity_key));
-  strictEqual(decoded.pre_key_id, null);
-  strictEqual(decoded.signed_pre_key_id, null);
+  const decoded = n.protoDecodePkmsg(encoded);
+  strictEqual(decoded.registrationId, 555);
+  deepStrictEqual(Buffer.from(decoded.baseKey), Buffer.from(msg.base_key));
+  deepStrictEqual(Buffer.from(decoded.identityKey), Buffer.from(msg.identity_key));
+  strictEqual(decoded.preKeyId ?? null, null);
+  strictEqual(decoded.signedPreKeyId ?? null, null);
 }
 
 // ── x3dh_build_initial_session ──
@@ -157,15 +157,13 @@ const FIXTURE = readFileSync(
   );
 
   const plaintext = Buffer.from('hello signal');
-  const encResult = JSON.parse(
-    n.ratchetEncrypt(sessionJson, plaintext, identityPub, recipientPub, 42)
-  );
-  ok(encResult.session_json, 'has session_json');
+  const encResult = n.ratchetEncrypt(sessionJson, plaintext, identityPub, 42);
+  ok(encResult.sessionJson, 'has sessionJson');
   ok(encResult.ciphertext, 'has ciphertext');
-  ok(typeof encResult.message_type === 'number');
+  ok(typeof encResult.messageType === 'number');
   ok(encResult.ciphertext.length > 0);
   // Initiator session carries pendingPreKey → first message is type 3.
-  strictEqual(encResult.message_type, 3, 'first message wraps as PKMsg');
+  strictEqual(encResult.messageType, 3, 'first message wraps as PKMsg');
 
   // decrypt_whisper and decrypt_pkmsg exist and are callable
   ok(typeof n.ratchetDecryptWhisper === 'function');

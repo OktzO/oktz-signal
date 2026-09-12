@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -43,6 +45,26 @@ pub fn curve_generate_keypair(seed: Buffer) -> Result<Vec<Buffer>> {
 
 // ── proto ──
 
+// Decoded results cross the boundary as napi objects with Buffer fields:
+// no JSON string round-trip, no byte-array→number→Buffer copies on JS side.
+#[napi(object)]
+pub struct WhisperMessageObj {
+    pub ephemeral_key: Buffer,
+    pub counter: u32,
+    pub previous_counter: u32,
+    pub ciphertext: Buffer,
+}
+
+#[napi(object)]
+pub struct PkmsgObj {
+    pub pre_key_id: Option<u32>,
+    pub base_key: Buffer,
+    pub identity_key: Buffer,
+    pub message: Buffer,
+    pub registration_id: u32,
+    pub signed_pre_key_id: Option<u32>,
+}
+
 #[napi]
 pub fn proto_encode_whisper(
     ephemeral_key: Buffer,
@@ -61,9 +83,14 @@ pub fn proto_encode_whisper(
 }
 
 #[napi]
-pub fn proto_decode_whisper(bytes: Buffer) -> Result<String> {
+pub fn proto_decode_whisper(bytes: Buffer) -> Result<WhisperMessageObj> {
     let msg = proto::decode_whisper(bytes.as_ref()).map_err(|e| Error::from_reason(e))?;
-    serde_json::to_string(&msg).map_err(|e| Error::from_reason(e.to_string()))
+    Ok(WhisperMessageObj {
+        ephemeral_key: Buffer::from(msg.ephemeral_key),
+        counter: msg.counter,
+        previous_counter: msg.previous_counter,
+        ciphertext: Buffer::from(msg.ciphertext),
+    })
 }
 
 #[napi]
@@ -75,9 +102,16 @@ pub fn proto_encode_pkmsg(json: String) -> Result<Buffer> {
 }
 
 #[napi]
-pub fn proto_decode_pkmsg(bytes: Buffer) -> Result<String> {
+pub fn proto_decode_pkmsg(bytes: Buffer) -> Result<PkmsgObj> {
     let msg = proto::decode_pkmsg(bytes.as_ref()).map_err(|e| Error::from_reason(e))?;
-    serde_json::to_string(&msg).map_err(|e| Error::from_reason(e.to_string()))
+    Ok(PkmsgObj {
+        pre_key_id: msg.pre_key_id,
+        base_key: Buffer::from(msg.base_key),
+        identity_key: Buffer::from(msg.identity_key),
+        message: Buffer::from(msg.message),
+        registration_id: msg.registration_id,
+        signed_pre_key_id: msg.signed_pre_key_id,
+    })
 }
 
 // ── session ──
@@ -154,23 +188,38 @@ pub fn x3dh_build_recipient_session(
 
 // ── ratchet ──
 
+#[napi(object)]
+pub struct EncryptResultObj {
+    pub session_json: String,
+    pub message_type: u8,
+    pub ciphertext: Buffer,
+}
+
+#[napi(object)]
+pub struct DecryptResultObj {
+    pub session_json: String,
+    pub plaintext: Buffer,
+}
+
 #[napi]
 pub fn ratchet_encrypt(
     session_json: String,
     plaintext: Buffer,
     our_identity_pub: Buffer,
-    remote_identity_pub: Buffer,
     our_registration_id: u32,
-) -> Result<String> {
+) -> Result<EncryptResultObj> {
     let result = ratchet::encrypt(
         &session_json,
         plaintext.as_ref(),
         our_identity_pub.as_ref(),
-        remote_identity_pub.as_ref(),
         our_registration_id,
     )
     .map_err(|e| Error::from_reason(e))?;
-    serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
+    Ok(EncryptResultObj {
+        session_json: result.session_json,
+        message_type: result.message_type,
+        ciphertext: Buffer::from(result.ciphertext),
+    })
 }
 
 #[napi]
@@ -178,14 +227,17 @@ pub fn ratchet_decrypt_whisper(
     session_json: String,
     ciphertext: Buffer,
     our_identity_pub: Buffer,
-) -> Result<String> {
+) -> Result<DecryptResultObj> {
     let result = ratchet::decrypt_whisper(
         &session_json,
         ciphertext.as_ref(),
         our_identity_pub.as_ref(),
     )
     .map_err(|e| Error::from_reason(e))?;
-    serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
+    Ok(DecryptResultObj {
+        session_json: result.session_json,
+        plaintext: Buffer::from(result.plaintext),
+    })
 }
 
 #[napi]
@@ -193,38 +245,15 @@ pub fn ratchet_decrypt_pkmsg(
     session_json: String,
     ciphertext: Buffer,
     our_identity_pub: Buffer,
-) -> Result<String> {
+) -> Result<DecryptResultObj> {
     let result = ratchet::decrypt_pkmsg(
         &session_json,
         ciphertext.as_ref(),
         our_identity_pub.as_ref(),
     )
     .map_err(|e| Error::from_reason(e))?;
-    serde_json::to_string(&result).map_err(|e| Error::from_reason(e.to_string()))
-}
-#[napi]
-pub fn test_derive(input: Buffer, salt: Buffer, info: Buffer, n: u32) -> Result<Vec<String>> {
-    let chunks = ratchet::derive_secrets_n(input.as_ref(), salt.as_ref(), info.as_ref(), n as usize)
-        .map_err(|e| Error::from_reason(e))?;
-    Ok(chunks.iter().map(|c| crate::util::b64(c)).collect())
-}
-
-#[napi]
-pub fn test_step_ratchet(session_json: String, remote_key_b64: String, previous_counter: u32) -> Result<String> {
-    let mut record = session::deserialize(&session_json).map_err(|e| Error::from_reason(e))?;
-    let entry = session::current_session_mut(&mut record).ok_or_else(|| Error::from_reason("no entry"))?;
-    let remote_key = crate::util::unb64(&remote_key_b64).map_err(|e| Error::from_reason(e))?;
-    let ratchet_priv = crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.privKey).map_err(|e| Error::from_reason(e))?;
-    let shared = curve::scalar_multiply(&ratchet_priv, &remote_key).map_err(|e| Error::from_reason(e))?;
-    let root_key = crate::util::unb64(&entry.currentRatchet.rootKey).map_err(|e| Error::from_reason(e))?;
-    let mk = ratchet::derive_secrets_n(&shared, &root_key, b"WhisperRatchet", 2).map_err(|e| Error::from_reason(e))?;
-    let shared_b64 = crate::util::b64(&shared);
-    let root_b64 = crate::util::b64(&root_key);
-    let chain_b64 = crate::util::b64(&mk[1]);
-    ratchet::maybe_step_ratchet(entry, &remote_key_b64, previous_counter).map_err(|e| Error::from_reason(e))?;
-    let mut chains = Vec::new();
-    for (k, c) in &entry.chains {
-        chains.push(format!("{}:type={}:key={}", k, c.chainType, c.chainKey.key));
-    }
-    Ok(format!("shared={}\nroot={}\nchain={}\n{}", shared_b64, root_b64, chain_b64, chains.join("\n")))
+    Ok(DecryptResultObj {
+        session_json: result.session_json,
+        plaintext: Buffer::from(result.plaintext),
+    })
 }

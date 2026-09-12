@@ -46,7 +46,8 @@ export class SessionBuilder {
   // Build recipient session from an incoming PreKeyWhisperMessage (no open
   // session yet). Returns a SessionRecord. Caller stores it and decrypts.
   // storage.loadPreKey/loadSignedPreKey return { privKey, pubKey } (libsignal shape).
-  // `message` is the JSON from native.protoDecodePkmsg (snake_case fields).
+  // `message` is the object from native.protoDecodePkmsg (camelCase Buffer fields;
+  // snake_case still accepted for hand-built payloads).
   async initIncoming(record, message) {
     const identity = await this.storage.getOurIdentity();
     const preKeyId = message.pre_key_id != null ? message.pre_key_id : message.preKeyId;
@@ -72,10 +73,12 @@ export class SessionBuilder {
       Buffer.from(signedPreKeyPair.privKey),
       Buffer.from(strip05(Buffer.from(signedPreKeyPair.pubKey))),
       preKeyPair ? Buffer.from(preKeyPair.privKey) : null,
-      Buffer.from(message.identity_key != null ? message.identity_key : message.identityKey),
-      Buffer.from(strip05(Buffer.from(message.base_key != null ? message.base_key : message.baseKey))),
-      message.registration_id != null ? message.registration_id : 0
+      Buffer.from(message.identityKey != null ? message.identityKey : message.identity_key),
+      Buffer.from(strip05(Buffer.from(message.baseKey != null ? message.baseKey : message.base_key))),
+      message.registrationId != null ? message.registrationId
+        : (message.registration_id != null ? message.registration_id : 0)
     );
     return new SessionRecord(sessionJson);
+
   }
 }

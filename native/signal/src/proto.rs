@@ -47,14 +47,17 @@ fn read_varint(bytes: &[u8], pos: &mut usize) -> Result<u64, String> {
         }
         let b = bytes[*pos];
         *pos += 1;
+        // Reject overlong/non-canonical varints BEFORE shifting: at the 10th
+        // byte (shift == 63) only value bits 0 or 1 are legal, and any further
+        // continuation byte would silently truncate with `<< 63`.
+        if shift >= 63 && b > 1 {
+            return Err("varint too long".into());
+        }
         result |= ((b & 0x7f) as u64) << shift;
         if b & 0x80 == 0 {
             return Ok(result);
         }
         shift += 7;
-        if shift >= 64 {
-            return Err("varint too long".into());
-        }
     }
 }
 
@@ -88,10 +91,14 @@ fn write_bytes(buf: &mut Vec<u8>, data: &[u8]) {
 
 fn read_tag(bytes: &[u8], pos: &mut usize) -> Result<(u32, u32), String> {
     let tag = read_varint(bytes, pos)?;
-    let field = (tag >> 3) as u32;
+    if tag > u32::MAX as u64 {
+        return Err("tag overflow".into());
+    }
+    let field = (tag as u32) >> 3;
     let wire = (tag & 0x07) as u32;
-    if field == 0 {
-        return Err("invalid field number 0".into());
+    // proto3: field numbers 1..=536870911; field 0 is invalid.
+    if field == 0 || field > 0x1fff_ffff {
+        return Err("invalid field number".into());
     }
     Ok((field, wire))
 }

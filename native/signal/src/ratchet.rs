@@ -224,16 +224,18 @@ pub struct DecryptResult {
 /// result = [0x33] || WhisperMessage(ephemeralKey, counter, previousCounter, ct) || MAC[0..8]
 /// If pendingPreKey is set, wraps as PreKeyWhisperMessage (message_type=3, ciphertext =
 /// [0x33] || encode_pkmsg). pendingPreKey persists until first decrypt (oracle behavior).
+/// Remote identity is read from the record's indexInfo (matches libsignal, which
+/// derives it from the stored session rather than a JS-supplied argument).
 pub fn encrypt(
     session_json: &str,
     plaintext: &[u8],
     our_identity_pub: &[u8],    // 33 bytes, sender identity
-    remote_identity_pub: &[u8], // 33 bytes, recipient identity
     our_registration_id: u32,   // sender's own registration ID (for PKMsg)
 ) -> Result<EncryptResult, String> {
     let mut record: SessionRecord = session::deserialize(session_json)?;
     let entry = session::current_session_mut(&mut record)
         .ok_or("no session entry")?;
+    let remote_identity_pub = crate::util::unb64(&entry.indexInfo.remoteIdentityKey)?;
 
     // Wire ephemeral keys are 33-byte (0x05 prefix) in WhisperMessage — same as
     // libsignal curve.generateKeyPair (prefixKeyInPublicKey). Internal chain
@@ -278,7 +280,7 @@ pub fn encrypt(
     // macInput = ourIdentityKey || remoteIdentityKey || [0x33] || msgBuf
     let mut mac_input = Vec::new();
     mac_input.extend_from_slice(our_identity_pub);
-    mac_input.extend_from_slice(remote_identity_pub);
+    mac_input.extend_from_slice(&remote_identity_pub);
     mac_input.push(0x33);
     mac_input.extend_from_slice(&msg_buf);
     let mac = hmac_sha256(&keys[1], &mac_input);
@@ -355,18 +357,21 @@ pub fn decrypt_whisper(
     let chain_id = crate::util::b64(eph_key);
     maybe_step_ratchet(entry, &chain_id, msg.previous_counter)?;
 
-    let mut chain = entry
-        .chains
-        .get(&chain_id)
-        .cloned()
-        .filter(|c| c.chainType == 0)
-        .ok_or("no receiving chain")?;
-
-    fill_message_keys(&mut chain, msg.counter as i64)?;
-    let message_key_b64 = chain
-        .messageKeys
-        .remove(&(msg.counter as i64))
-        .ok_or("message key not found")?;
+    // Step the receiving chain IN PLACE (no full-chain clone; a chain can hold
+    // up to 2000 skipped message keys). On any error the whole record is
+    // discarded by the caller, so mid-flight mutation is safe to keep.
+    let message_key_b64 = {
+        let chain = entry
+            .chains
+            .get_mut(&chain_id)
+            .filter(|c| c.chainType == 0)
+            .ok_or("no receiving chain")?;
+        fill_message_keys(chain, msg.counter as i64)?;
+        chain
+            .messageKeys
+            .remove(&(msg.counter as i64))
+            .ok_or("message key not found")?
+    };
     let message_key = crate::util::unb64(&message_key_b64)?;
 
     let keys = derive_secrets_n(&message_key, &[0u8; 32], b"WhisperMessageKeys", 3)?;
@@ -379,15 +384,17 @@ pub fn decrypt_whisper(
     mac_input.extend_from_slice(our_identity_pub);
     mac_input.push(0x33);
     mac_input.extend_from_slice(msg_buf);
-    let expected = hmac_sha256(&keys[1], &mac_input);
-    if &expected[..8] != mac_bytes {
-        return Err("MAC verification failed".to_string());
-    }
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(&keys[1]).map_err(|e| e.to_string())?;
+    mac.update(&mac_input);
+    // Constant-time truncated-tag compare. NB: `verify_slice` demands a
+    // full-length tag; `verify_truncated_left` is the constant-time prefix
+    // check that matches the 8-byte wire MAC.
+    mac.verify_truncated_left(mac_bytes)
+        .map_err(|_| "MAC verification failed".to_string())?;
 
     let iv: [u8; 16] = keys[2][..16].try_into().map_err(|_| "iv length")?;
     let plaintext = aes_cbc_decrypt(&keys[0], &iv, &msg.ciphertext)?;
 
-    entry.chains.insert(chain_id, chain);
     entry.pendingPreKey = None; // delete pendingPreKey
 
     let session_json = session::serialize(&record)?;
@@ -531,7 +538,7 @@ mod tests {
         let (alice, bob, alice_id, bob_id) = build_pair();
         let plaintext = b"hello signal";
 
-        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
+        let enc = encrypt(&alice, plaintext, &alice_id, 42).unwrap();
         assert_eq!(enc.message_type, 1);
         assert_eq!(enc.ciphertext[0], 0x33, "version byte");
         assert!(enc.ciphertext.len() >= 1 + 8, "version + msgBuf + 8B mac");
@@ -552,7 +559,7 @@ mod tests {
             .collect();
 
         for (i, m) in msgs.iter().enumerate() {
-            let enc = encrypt(&alice, m, &alice_id, &bob_id, 42).unwrap();
+            let enc = encrypt(&alice, m, &alice_id, 42).unwrap();
             alice = enc.session_json;
             let dec = decrypt_whisper(&bob, &enc.ciphertext, &bob_id).unwrap();
             bob = dec.session_json;
@@ -571,7 +578,7 @@ mod tests {
         let (alice, bob, alice_id, bob_id) = build_pair();
         let plaintext = b"integrity check";
 
-        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
+        let enc = encrypt(&alice, plaintext, &alice_id, 42).unwrap();
         let mut tampered = enc.ciphertext.clone();
         let last = tampered.len() - 1;
         tampered[last] ^= 0x01;
@@ -591,13 +598,13 @@ mod tests {
     fn test_chain_key_advances() {
         let (alice, _, alice_id, bob_id) = build_pair();
 
-        let enc1 = encrypt(&alice, b"first", &alice_id, &bob_id, 42).unwrap();
+        let enc1 = encrypt(&alice, b"first", &alice_id, 42).unwrap();
         let rec1: SessionRecord = session::deserialize(&enc1.session_json).unwrap();
         let e1 = rec1.sessions.values().next().unwrap();
         let c1 = e1.chains.values().find(|c| c.chainType == 1).unwrap();
         assert_eq!(c1.chainKey.counter, 0);
 
-        let enc2 = encrypt(&enc1.session_json, b"second", &alice_id, &bob_id, 42).unwrap();
+        let enc2 = encrypt(&enc1.session_json, b"second", &alice_id, 42).unwrap();
         let rec2: SessionRecord = session::deserialize(&enc2.session_json).unwrap();
         let e2 = rec2.sessions.values().next().unwrap();
         let c2 = e2.chains.values().find(|c| c.chainType == 1).unwrap();
@@ -609,7 +616,7 @@ mod tests {
         let (alice, bob, alice_id, bob_id) = build_pair();
         let plaintext = b"pkmsg payload";
 
-let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
+let enc = encrypt(&alice, plaintext, &alice_id, 42).unwrap();
         let pkmsg = proto::PreKeyWhisperMessage {
             pre_key_id: Some(123),
             base_key: vec![0x01; 32],
@@ -630,7 +637,7 @@ let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
     fn test_decrypt_pkmsg_no_session_fails() {
         let (alice, _, alice_id, bob_id) = build_pair();
         let plaintext = b"pkmsg payload";
-        let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
+        let enc = encrypt(&alice, plaintext, &alice_id, 42).unwrap();
         let pkmsg = proto::PreKeyWhisperMessage {
             pre_key_id: Some(123),
             base_key: vec![0x01; 32],
@@ -686,7 +693,7 @@ let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         let self_session = session::serialize(&record).unwrap();
 
         let plaintext = b"self roundtrip";
-        let enc = encrypt(&self_session, plaintext, &identity, &identity, 42).unwrap();
+        let enc = encrypt(&self_session, plaintext, &identity, 42).unwrap();
         let dec = decrypt_whisper(&self_session, &enc.ciphertext, &identity).unwrap();
         assert_eq!(dec.plaintext, plaintext);
     }
@@ -699,7 +706,7 @@ let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         let (alice, bob, alice_id, bob_id) = build_handshake(None);
 
         // Alice's first message → type 3 (PreKeyWhisperMessage).
-        let enc1 = encrypt(&alice, b"first", &alice_id, &bob_id, 42).unwrap();
+        let enc1 = encrypt(&alice, b"first", &alice_id, 42).unwrap();
         assert_eq!(enc1.message_type, 3, "first message wraps as PKMsg");
         assert_eq!(enc1.ciphertext[0], 0x33);
 
@@ -721,7 +728,7 @@ let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         );
 
         // Bob replies → type 1 (no pendingPreKey on recipient).
-        let enc2 = encrypt(&dec1.session_json, b"reply", &bob_id, &alice_id, 42).unwrap();
+        let enc2 = encrypt(&dec1.session_json, b"reply", &bob_id, 42).unwrap();
         assert_eq!(enc2.message_type, 1, "recipient reply is plain WhisperMessage");
 
         // Alice decrypts the reply — her pendingPreKey is now cleared.
@@ -738,12 +745,12 @@ let enc = encrypt(&alice, plaintext, &alice_id, &bob_id, 42).unwrap();
         let opk_priv = [0x99u8; 32];
         let (alice, bob, alice_id, bob_id) = build_handshake(Some(opk_priv));
 
-        let enc1 = encrypt(&alice, b"opk first", &alice_id, &bob_id, 42).unwrap();
+        let enc1 = encrypt(&alice, b"opk first", &alice_id, 42).unwrap();
         assert_eq!(enc1.message_type, 3);
         let dec1 = decrypt_pkmsg(&bob, &enc1.ciphertext, &bob_id).unwrap();
         assert_eq!(dec1.plaintext, b"opk first");
 
-        let enc2 = encrypt(&dec1.session_json, b"opk reply", &bob_id, &alice_id, 42).unwrap();
+        let enc2 = encrypt(&dec1.session_json, b"opk reply", &bob_id, 42).unwrap();
         let dec2 = decrypt_whisper(&enc1.session_json, &enc2.ciphertext, &alice_id).unwrap();
         assert_eq!(dec2.plaintext, b"opk reply");
     }

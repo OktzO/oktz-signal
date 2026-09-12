@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHmac, createHash } from 'crypto';
+import { createCipheriv, createDecipheriv, createHmac, createHash, timingSafeEqual } from 'crypto';
 
 function assertBuffer(value) {
   if (!(value instanceof Buffer)) throw new TypeError(`Expected Buffer`);
@@ -51,7 +51,9 @@ export function deriveSecrets(input, salt, info, chunks = 3) {
 }
 
 export function verifyMAC(data, key, mac, length) {
-  const calculated = calculateMAC(key, data).slice(0, length);
-  if (mac.length !== length || calculated.length !== length) throw new Error('Bad MAC length');
-  if (!mac.equals(calculated)) throw new Error('Bad MAC');
+  assertBuffer(mac);
+  if (mac.length !== length) throw new Error('Bad MAC length');
+  const calculated = calculateMAC(key, data).subarray(0, length);
+  // Constant-time compare — `equals` leaks byte-prefix timing.
+  if (!timingSafeEqual(mac, calculated)) throw new Error('Bad MAC');
 }

@@ -173,9 +173,9 @@ describe('protocol oracle: libsignal → oktz-signal interop', () => {
     assert.strictEqual(fullCiphertext[0], 0x33, 'version byte must be 0x33');
 
     // 8. Decrypt with oktz-signal native
-    const result = JSON.parse(native.ratchetDecryptPkmsg(
+    const result = native.ratchetDecryptPkmsg(
       bobSessionJson, fullCiphertext, bobPub33
-    ));
+    );
 
     assert.deepStrictEqual(Buffer.from(result.plaintext), plaintext,
       'oktz-signal decrypt mismatch');
@@ -210,12 +210,13 @@ describe('protocol oracle: oktz-signal → libsignal interop', () => {
       bobPub33, spkPub, 42, 1 // signed_key_id
     );
 
-    // 5. Encrypt with oktz-native — returns type 3 (PKMsg) since pendingPreKey set
+    // 5. Encrypt with oktz-native — returns type 3 (PKMsg) since pendingPreKey set.
+    // Remote identity is now derived natively from the session record.
     const plaintext = Buffer.from('hello from oktz-signal');
-    const encResult = JSON.parse(native.ratchetEncrypt(
-      aliceSessionJson, plaintext, alicePub33, bobPub33, 42
-    ));
-    assert.strictEqual(encResult.message_type, 3, 'first message must be type 3 (PKMsg)');
+    const encResult = native.ratchetEncrypt(
+      aliceSessionJson, plaintext, alicePub33, 42
+    );
+    assert.strictEqual(encResult.messageType, 3, 'first message must be type 3 (PKMsg)');
 
     // encResult.ciphertext is already [0x33] || encode_pkmsg(PreKeyWhisperMessage)
     // which is exactly what libsignal expects — pass it directly.

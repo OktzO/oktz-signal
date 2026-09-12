@@ -4,13 +4,15 @@ const native = require('../native/signal/index.cjs');
 
 export class SessionRecord {
   constructor(data) {
-    if (typeof data === 'string') {
-      this._json = native.sessionDeserialize(data);
-    } else {
-      this._json = native.sessionDeserialize(JSON.stringify(data || {}));
-    }
+    // Strings are stored raw: every string reaching here comes from the
+    // native layer (x3dh/ratchet/serialize output) which already emits the
+    // canonical libsignal-compatible form. The old deserialize+serialize
+    // round-trip per message cost ~20-40 µs for pure re-normalization.
+    this._json = typeof data === 'string' ? data : native.sessionSerialize(JSON.stringify(data || {}));
   }
-  static deserialize(data) { return new SessionRecord(data); }
-  serialize() { return native.sessionSerialize(this._json); }
+  static deserialize(data) {
+    return new SessionRecord(typeof data === 'string' ? data : JSON.stringify(data));
+  }
+  serialize() { return this._json; }
   haveOpenSession() { return native.sessionHaveOpenSession(this._json); }
 }

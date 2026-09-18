@@ -1,0 +1,9 @@
+{
+  "name": "@oktz-signal/signal-android-arm64",
+  "version": "0.3.0-rc.1",
+  "license": "MIT",
+  "main": "signal.android-arm64.node",
+  "files": ["signal.android-arm64.node"],
+  "os": ["android"],
+  "cpu": ["arm64"]
+}

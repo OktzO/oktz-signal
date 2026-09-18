@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-linux:
+    name: ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            package: linux-x64-gnu
+            command: npm exec -- napi build --release --target x86_64-unknown-linux-gnu --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: x86_64-unknown-linux-musl
+            package: linux-x64-musl
+            command: npm exec -- napi build --release --target x86_64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: aarch64-unknown-linux-gnu
+            package: linux-arm64-gnu
+            command: npm exec -- napi build --release --target aarch64-unknown-linux-gnu --use-napi-cross --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: aarch64-unknown-linux-musl
+            package: linux-arm64-musl
+            command: npm exec -- napi build --release --target aarch64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: zig
+      - run: npm ci
+      - run: ${{ matrix.command }}
+      - run: npm exec -- napi artifacts --config-path napi.config.json --output-dir native/signal --npm-dir npm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signal-${{ matrix.package }}
+          path: npm/${{ matrix.package }}
+          if-no-files-found: error
+  publish:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signal-linux-x64-gnu
+          path: npm/linux-x64-gnu
+      - uses: actions/download-artifact@v4
+        with:
+          name: signal-linux-x64-musl
+          path: npm/linux-x64-musl
+      - uses: actions/download-artifact@v4
+        with:
+          name: signal-linux-arm64-gnu
+          path: npm/linux-arm64-gnu
+      - uses: actions/download-artifact@v4
+        with:
+          name: signal-linux-arm64-musl
+          path: npm/linux-arm64-musl
+      - name: Verify publish tarballs
+        run: |
+          npm pack --dry-run
+          npm pack --dry-run --prefix npm/linux-x64-gnu
+          npm pack --dry-run --prefix npm/linux-x64-musl
+          npm pack --dry-run --prefix npm/linux-arm64-gnu
+          npm pack --dry-run --prefix npm/linux-arm64-musl
+      - name: Publish Linux platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --ignore-scripts --provenance npm/linux-x64-gnu
+          npm publish --ignore-scripts --provenance npm/linux-x64-musl
+          npm publish --ignore-scripts --provenance npm/linux-arm64-gnu
+          npm publish --ignore-scripts --provenance npm/linux-arm64-musl
+      - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --ignore-scripts --provenance

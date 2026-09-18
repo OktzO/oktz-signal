@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.target }} (${{ matrix.status }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            package: linux-x64-gnu
+            status: runtime-tested
+            command: npm exec -- napi build --release --target x86_64-unknown-linux-gnu --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: x86_64-unknown-linux-musl
+            package: linux-x64-musl
+            status: compile-only
+            command: npm exec -- napi build --release --target x86_64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: aarch64-unknown-linux-gnu
+            package: linux-arm64-gnu
+            status: compile-only
+            command: npm exec -- napi build --release --target aarch64-unknown-linux-gnu --use-napi-cross --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: aarch64-unknown-linux-musl
+            package: linux-arm64-musl
+            status: compile-only
+            command: npm exec -- napi build --release --target aarch64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: aarch64-linux-android
+            package: android-arm64
+            status: compile-only
+            command: npm exec -- napi build --release --target aarch64-linux-android --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: zig
+      - run: npm ci
+      - name: Build platform package
+        run: ${{ matrix.command }}
+      - name: Create npm artifact
+        run: npm exec -- napi artifacts --config-path napi.config.json --output-dir native/signal --npm-dir npm
+      - name: Test runnable Linux x64 GNU build
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          npm test
+          node --test tests/platform-loader.test.mjs tests/pack-install.test.mjs
+      - name: Runtime status
+        run: echo "${{ matrix.target }}: ${{ matrix.status }}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signal-${{ matrix.package }}
+          path: npm/${{ matrix.package }}
+          if-no-files-found: error

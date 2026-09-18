@@ -794,3 +794,4 @@ module.exports.sessionHaveOpenSession = nativeBinding.sessionHaveOpenSession
 module.exports.sessionSerialize = nativeBinding.sessionSerialize
 module.exports.x3DhBuildInitialSession = nativeBinding.x3DhBuildInitialSession
 module.exports.x3DhBuildRecipientSession = nativeBinding.x3DhBuildRecipientSession
+module.exports.default = nativeBinding

@@ -36,7 +36,7 @@
 
 ## Commits
 
-- Pending at report creation.
+- `db2f118 feat: package signal prebuilds by platform`
 
 ## Concerns
 

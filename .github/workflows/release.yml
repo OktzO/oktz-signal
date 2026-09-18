@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      termux_test_passed:
+        type: boolean
+        description: 'Android Termux runtime test passed'
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -30,6 +36,9 @@ jobs:
           - target: aarch64-unknown-linux-musl
             package: linux-arm64-musl
             command: npm exec -- napi build --release --target aarch64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+          - target: aarch64-linux-android
+            package: android-arm64
+            command: npm exec -- napi build --release --target aarch64-linux-android --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -76,6 +85,10 @@ jobs:
         with:
           name: signal-linux-arm64-musl
           path: npm/linux-arm64-musl
+      - uses: actions/download-artifact@v4
+        with:
+          name: signal-android-arm64
+          path: npm/android-arm64
       - name: Verify publish tarballs
         run: |
           npm pack --dry-run
@@ -83,6 +96,7 @@ jobs:
           npm pack --dry-run --prefix npm/linux-x64-musl
           npm pack --dry-run --prefix npm/linux-arm64-gnu
           npm pack --dry-run --prefix npm/linux-arm64-musl
+          npm pack --dry-run --prefix npm/android-arm64
       - name: Publish Linux platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -91,6 +105,11 @@ jobs:
           npm publish --ignore-scripts --provenance npm/linux-x64-musl
           npm publish --ignore-scripts --provenance npm/linux-arm64-gnu
           npm publish --ignore-scripts --provenance npm/linux-arm64-musl
+      - name: Publish Android platform package
+        if: ${{ inputs.termux_test_passed == 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --ignore-scripts --provenance npm/android-arm64
       - name: Publish main package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

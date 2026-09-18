@@ -3,6 +3,13 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      termux_test_passed:
+        type: boolean
+        description: 'Android Termux runtime test passed'
+        required: false
+        default: false
 
 jobs:
   build:

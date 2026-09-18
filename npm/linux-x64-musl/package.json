@@ -1,0 +1,9 @@
+{
+  "name": "@oktz-signal/signal-linux-x64-musl",
+  "version": "0.3.0-rc.1",
+  "license": "MIT",
+  "main": "signal.linux-x64-musl.node",
+  "files": ["signal.linux-x64-musl.node"],
+  "os": ["linux"],
+  "cpu": ["x64"]
+}

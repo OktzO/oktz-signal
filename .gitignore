@@ -1,3 +1,6 @@
 target/
 node_modules/
 *.node
+/native/signal/target/
+/native/signal/signal.*.node
+/npm/*/*.node

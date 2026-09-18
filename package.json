@@ -9,10 +9,11 @@
     "index.js",
     "src/",
     "native/signal/index.cjs",
-    "native/signal/signal.linux-x64-gnu.node"
+    "napi.config.json"
   ],
   "scripts": {
-    "build:native": "cd native/signal && npx cargo-cp-artifact --artifact cdylib signal signal.linux-x64-gnu.node -- cargo build --release --message-format=json-render-diagnostics",
+    "build:native": "napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs",
+    "build:source": "cargo build --manifest-path native/signal/Cargo.toml --release",
     "build": "npm run build:native",
     "test": "node --test tests/",
     "prepublishOnly": "npm run build"
@@ -21,6 +22,14 @@
     "node": ">=20.0.0"
   },
   "devDependencies": {
+    "@napi-rs/cli": "3.10.4",
     "libsignal": "^6.0.0"
+  },
+  "optionalDependencies": {
+    "@oktz-signal/signal-android-arm64": "0.3.0-rc.1",
+    "@oktz-signal/signal-linux-arm64-gnu": "0.3.0-rc.1",
+    "@oktz-signal/signal-linux-arm64-musl": "0.3.0-rc.1",
+    "@oktz-signal/signal-linux-x64-gnu": "0.3.0-rc.1",
+    "@oktz-signal/signal-linux-x64-musl": "0.3.0-rc.1"
   }
 }

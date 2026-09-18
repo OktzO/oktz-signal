@@ -50,6 +50,56 @@ Native binary disertakan untuk **`linux-x64-gnu`** (`signal.linux-x64-gnu.node`)
 npm run build:native   # butuh Rust + gcc (nix-shell -p gcc)
 ```
 
+### Manual build commands (untuk developer & host tidak didukung)
+
+Prasyarat per target:
+- **Linux x64 GNU (default)**: Rust stable + `gcc` / `clang`
+- **Linux x64 musl (Alpine)**: Rust stable + `musl-gcc` + **Zig** (cross-compile via `zig cc`)
+- **Linux ARM64 GNU**: Rust stable + `aarch64-linux-gnu-gcc` + **Zig** (cross-compile via `zig cc`)
+- **Linux ARM64 musl (Alpine)**: Rust stable + **Zig** (cross-compile via `zig cc`)
+- **Android ARM64 (Termux)**: Rust stable + **Android NDK** + `rustup target add aarch64-linux-android`
+
+Commands (dijalankan dari root repo `oktz-signal`):
+
+```bash
+# Linux x64 GNU (native build)
+cargo build --manifest-path native/signal/Cargo.toml --release --target x86_64-unknown-linux-gnu
+
+# Linux x64 musl (cross-compile, butuh Zig)
+rustup target add x86_64-unknown-linux-musl
+cargo build --manifest-path native/signal/Cargo.toml --release --target x86_64-unknown-linux-musl
+
+# Linux ARM64 GNU (cross-compile, butuh Zig + aarch64-linux-gnu toolchain)
+rustup target add aarch64-unknown-linux-gnu
+cargo build --manifest-path native/signal/Cargo.toml --release --target aarch64-unknown-linux-gnu
+
+# Linux ARM64 musl (cross-compile, butuh Zig)
+rustup target add aarch64-unknown-linux-musl
+cargo build --manifest-path native/signal/Cargo.toml --release --target aarch64-unknown-linux-musl
+
+# Android ARM64 (butuh Android NDK di $ANDROID_NDK_HOME atau $ANDROID_HOME/ndk/...)
+rustup target add aarch64-linux-android
+cargo build --manifest-path native/signal/Cargo.toml --release --target aarch64-linux-android
+```
+
+> **Catatan**: Command di atas memakai `cargo` langsung (bukan `napi build`) untuk build dari source tanpa napi-rs CLI. Hasil binary ada di `native/signal/target/<target>/release/libsignal.{so|dylib|dll}`. Untuk publish ke npm, gunakan `napi build --release --target <target> ...` seperti di CI.
+
+### Platform install verification
+
+Setelah install (via npm atau build lokal), verifikasi native module load:
+
+```bash
+# Verifikasi native API tersedia
+node -e "import('oktz-signal').then(({ native }) => console.log(typeof native.ratchetEncrypt))"
+# Output: function
+
+# Verifikasi curve25519 (dependency terpisah)
+node -e "console.log(typeof require('oktz-curve25519').sign)"
+# Output: function
+```
+
+Kedua command harus mengeluarkan `function`. Jika error/undefined, native binary tidak cocok platform atau gagal load.
+
 ## Penggunaan
 
 ```js

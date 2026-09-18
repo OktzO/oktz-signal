@@ -50,3 +50,11 @@
 - `node --test tests/platform-loader.test.mjs` initially failed as expected because `native.default` was `undefined`; after the alias it passed.
 - `npm test && node --test tests/platform-loader.test.mjs`: passed, 19 suite tests and 2 standalone loader tests.
 - `npm pack --dry-run`: passed; main tarball excludes `.node` and `native/signal/target/`.
+
+## Review Fixes: Package Manager Integration
+
+- Replaced manual temporary `node_modules` seeding with offline package-manager installation. The loader test packs main package plus GNU x64 platform package, runs `npm install --ignore-scripts --offline --no-audit --no-fund` against both tarballs, then imports `oktz-signal` by package name.
+- The test stages host GNU binary only while packing platform package, then deletes binary and both tarballs in `finally`. Main tarball remains binary-free.
+- Replaced `import.meta.dirname` with `dirname(fileURLToPath(import.meta.url))` for declared Node `>=20.0.0` compatibility.
+- First package-manager test run failed because platform tarball had no binary: its `files` list excluded an unstaged artifact. Staging it during platform packing fixed the actual packaging path.
+- `node --test tests/platform-loader.test.mjs`: passed, 2 tests.

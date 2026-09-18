@@ -42,3 +42,11 @@
 
 - Host has no `cc`; plain `npm run build:native` and `npm run build:source` cannot link. Use an installed C compiler, or invoke NAPI-RS with `--use-napi-cross` in supported Linux CI.
 - Generated loader supports additional NAPI-RS platform branches, but only five requested optional packages are declared and packaged.
+
+## Review Fixes
+
+- Restored legacy `native.default === native` by aliasing generated loader export to `nativeBinding` after NAPI-RS named export assignments.
+- Extended `tests/platform-loader.test.mjs` with an isolated packed-package integration test. It extracts `npm pack --json` output, installs only `@oktz-signal/signal-linux-x64-gnu` into a temporary `node_modules`, and imports the packed main package. The test proves optional package resolution instead of local ignored binary resolution.
+- `node --test tests/platform-loader.test.mjs` initially failed as expected because `native.default` was `undefined`; after the alias it passed.
+- `npm test && node --test tests/platform-loader.test.mjs`: passed, 19 suite tests and 2 standalone loader tests.
+- `npm pack --dry-run`: passed; main tarball excludes `.node` and `native/signal/target/`.

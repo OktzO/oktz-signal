@@ -57,8 +57,25 @@ jobs:
           name: signal-${{ matrix.package }}
           path: npm/${{ matrix.package }}
           if-no-files-found: error
+  verify:
+    name: verify test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - name: Build host binding for the test suite
+        run: npm exec -- napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+      - name: Run the test suite that gates this publish
+        run: npm run test:all
   publish:
-    needs: build-linux
+    needs:
+      - build-linux
+      - verify
     runs-on: ubuntu-latest
     environment: npm
     steps:

@@ -26,33 +26,33 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             package: linux-x64-gnu
-            command: npm exec -- napi build --release --target x86_64-unknown-linux-gnu --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+            command: npm exec -- napi build --release --target x86_64-unknown-linux-gnu --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs -- --locked
           - target: x86_64-unknown-linux-musl
             package: linux-x64-musl
-            command: npm exec -- napi build --release --target x86_64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+            command: npm exec -- napi build --release --target x86_64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs -- --locked
           - target: aarch64-unknown-linux-gnu
             package: linux-arm64-gnu
-            command: npm exec -- napi build --release --target aarch64-unknown-linux-gnu --use-napi-cross --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+            command: npm exec -- napi build --release --target aarch64-unknown-linux-gnu --use-napi-cross --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs -- --locked
           - target: aarch64-unknown-linux-musl
             package: linux-arm64-musl
-            command: npm exec -- napi build --release --target aarch64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+            command: npm exec -- napi build --release --target aarch64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs -- --locked
           - target: aarch64-linux-android
             package: android-arm64
-            command: npm exec -- napi build --release --target aarch64-linux-android --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+            command: npm exec -- napi build --release --target aarch64-linux-android --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs -- --locked
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: zig
       - run: npm ci
       - run: ${{ matrix.command }}
       - run: npm exec -- napi artifacts --config-path napi.config.json --output-dir native/signal --npm-dir npm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signal-${{ matrix.package }}
           path: npm/${{ matrix.package }}
@@ -61,15 +61,15 @@ jobs:
     name: verify test suite
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - run: npm ci
       - name: Build host binding for the test suite
-        run: npm exec -- napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
+        run: npm exec -- napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs -- --locked
       - name: Run the test suite that gates this publish
         run: npm run test:all
   publish:
@@ -79,30 +79,30 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signal-linux-x64-gnu
           path: npm/linux-x64-gnu
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signal-linux-x64-musl
           path: npm/linux-x64-musl
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signal-linux-arm64-gnu
           path: npm/linux-arm64-gnu
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signal-linux-arm64-musl
           path: npm/linux-arm64-musl
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signal-android-arm64
           path: npm/android-arm64

@@ -140,3 +140,52 @@ test('ci.yml claims a binary was loaded only for a target the runner can actuall
       `ci.yml labels ${target} \`${status}\` but no step that loads a binary selects it`);
   }
 });
+
+const napiBuilds = (doc) => Object.values(doc.jobs).flatMap((job) =>
+  [...steps(job).map((s) => s.run), ...(job.strategy?.matrix?.include ?? []).map((e) => e.command ?? '')]
+    .filter((run) => /napi build/.test(run ?? '')));
+
+const directCargo = (doc) => Object.values(doc.jobs).flatMap((job) =>
+  steps(job).map((s) => s.run).filter((run) => /\bcargo (build|test|metadata|check)\b/.test(run ?? '')));
+
+const unpinned = (uses) => {
+  const ref = uses.slice(uses.indexOf('@') + 1);
+  return !/^[0-9a-f]{40}$/.test(ref);
+};
+
+test('package.json build:source passes --locked to cargo', () => {
+  const build = scripts['build:source'];
+  assert.match(build, /^\s*cargo\b[\s\S]*\s--locked(\s|$)/,
+    `scripts.build:source must pass --locked, got: ${build}`);
+});
+
+test('every napi build in a workflow passes --locked through to cargo', () => {
+  // napi build has no --locked of its own; `napi build ... -- --locked`
+  // forwards it to cargo build. Without it cargo re-resolves and rewrites
+  // Cargo.lock inside the release build, so the published binary does not
+  // correspond to the committed lock.
+  for (const name of NAMES) {
+    for (const command of napiBuilds(parse(name))) {
+      assert.match(command, /-- --locked$/m,
+        `${name}: napi build does not forward --locked to cargo, so the lock is re-resolved during the build: ${command.trim()}`);
+    }
+  }
+});
+
+test('every direct cargo invocation in a workflow passes --locked', () => {
+  for (const name of NAMES) {
+    for (const run of directCargo(parse(name))) {
+      assert.match(run, /\s--locked(\s|$)/, `${name}: cargo invocation is not --locked: ${run.trim()}`);
+    }
+  }
+});
+
+test('every action is pinned to a full commit SHA', () => {
+  for (const name of NAMES) {
+    for (const step of Object.values(parse(name).jobs).flatMap((job) => steps(job))) {
+      if (!step.uses || step.uses.startsWith('./') || step.uses.startsWith('docker://')) continue;
+      assert.equal(unpinned(step.uses), false,
+        `${name}: \`${step.uses}\` is pinned to a mutable tag; use the full commit SHA`);
+    }
+  }
+});

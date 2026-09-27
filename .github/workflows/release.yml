@@ -62,7 +62,17 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - run: npm ci
+      - name: Verify the published loader before anything can ship it
+        # The publish job runs `npm publish --ignore-scripts`, so prepublishOnly
+        # never runs in CI and nothing else here would notice a regenerated
+        # native/signal/index.cjs. The loader is hand-patched on top of
+        # `napi build` output; a regenerated one reverts all of it silently.
+        run: npm run verify:loader
       - name: Build host binding for the test suite
+        # --no-js: this job needs the .node, not the loader. The loader is the
+        # committed, hand-patched file that `npm run build:loader` produces from
+        # generator output, and regenerating it here would replace the artifact
+        # under test with one that is missing its patches.
         run: npm exec -- napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --no-js -- --locked
       - name: Run the test suite that gates this publish
         run: npm run test:all

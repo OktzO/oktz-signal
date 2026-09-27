@@ -2,6 +2,24 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+// `Zeroize`/`ZeroizeOnDrop` scrub the record's key material — root key, ratchet
+// private key, chain keys, every derived message key — when it is released.
+// Public fields (keys already in the clear, counters, indices, identifiers) are
+// `#[zeroize(skip)]`: there is nothing to scrub and skipping keeps the
+// derivation free of bounds on types that carry no secret.
+//
+// `zeroize` implements no `BTreeMap` impl, and the map field types cannot become
+// a wrapper because the ratchet and x3dh modules construct them as `BTreeMap`
+// directly, so the three structs holding a secret map carry hand-written impls
+// that walk it; everything else derives.
+
+fn zeroize_map<K, V: Zeroize>(map: &mut BTreeMap<K, V>) {
+    for value in map.values_mut() {
+        value.zeroize();
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SessionRecord {
@@ -9,6 +27,20 @@ pub struct SessionRecord {
     pub sessions: BTreeMap<String, SessionEntry>,
     #[serde(default = "default_version")]
     pub version: String,
+}
+
+impl Zeroize for SessionRecord {
+    fn zeroize(&mut self) {
+        zeroize_map(&mut self.sessions);
+    }
+}
+
+impl ZeroizeOnDrop for SessionRecord {}
+
+impl Drop for SessionRecord {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -22,16 +54,34 @@ pub struct SessionEntry {
     pub pendingPreKey: Option<PendingPreKey>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+impl Zeroize for SessionEntry {
+    fn zeroize(&mut self) {
+        self.currentRatchet.zeroize();
+        zeroize_map(&mut self.chains);
+    }
+}
+
+impl ZeroizeOnDrop for SessionEntry {}
+
+impl Drop for SessionEntry {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct Ratchet {
     pub ephemeralKeyPair: KeyPair,
+    #[zeroize(skip)]
     pub lastRemoteEphemeralKey: String,
+    #[zeroize(skip)]
     pub previousCounter: u32,
     pub rootKey: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct KeyPair {
+    #[zeroize(skip)]
     pub pubKey: String,
     pub privKey: String,
 }
@@ -53,8 +103,26 @@ pub struct Chain {
     pub messageKeys: BTreeMap<i64, String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+impl Zeroize for Chain {
+    fn zeroize(&mut self) {
+        self.chainKey.zeroize();
+        for value in self.messageKeys.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+impl ZeroizeOnDrop for Chain {}
+
+impl Drop for Chain {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct ChainKey {
+    #[zeroize(skip)]
     pub counter: i64,
     pub key: String,
 }
@@ -122,8 +190,29 @@ pub fn archive_current(record: &mut SessionRecord) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::{Zeroize, ZeroizeOnDrop};
 
     const FIXTURE: &str = include_str!("../../../fixtures/libsignal-session.json");
+
+    #[test]
+    fn session_secrets_are_zeroized() {
+        // Compile-time assertion: the structs carrying the root key, the
+        // ratchet private key, the chain keys and every derived message key
+        // must scrub themselves on drop, so a record the ratchet releases does
+        // not leave key material behind in the heap. Zeroization is a drop-time
+        // property with no runtime observable, hence the trait bound on each
+        // secret-carrying type rather than a value assertion.
+        fn zeroizes_on_drop<T: Zeroize + ZeroizeOnDrop>(_v: &T) {}
+        let record = deserialize(FIXTURE).unwrap();
+        zeroizes_on_drop(&record);
+        let entry = record.sessions.values().next().unwrap();
+        zeroizes_on_drop(entry);
+        zeroizes_on_drop(&entry.currentRatchet);
+        zeroizes_on_drop(&entry.currentRatchet.ephemeralKeyPair);
+        let chain = entry.chains.values().next().unwrap();
+        zeroizes_on_drop(chain);
+        zeroizes_on_drop(&chain.chainKey);
+    }
 
     #[test]
     fn test_fixture_deserialize() {

@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 //   wire 0   = varint (uint32 fields)
 //   wire 2   = length-delimited (bytes fields)
 //   wire 1/5 = fixed64/fixed32 (only needed to skip unknown fields)
-//   Unknown fields are skipped (proto3 semantics).
+// Unknown fields are skipped (proto3 semantics), but a known field at the wrong
+// wire type is an error rather than a skip, and the fields below marked
+// "required" must be present and non-empty — otherwise a malformed message
+// would decode into a well-formed one with silently defaulted values.
 //
 // WhisperMessage:        1 ephemeral_key (bytes), 2 counter (varint),
 //                        3 previous_counter (varint), 4 ciphertext (bytes)
@@ -125,6 +128,7 @@ fn skip_field(bytes: &[u8], pos: &mut usize, wire: u32) -> Result<(), String> {
             read_bytes(bytes, pos)?;
             Ok(())
         }
+        3 | 4 => Err("group wire type is not supported".into()),
         5 => {
             if bytes.len().saturating_sub(*pos) < 4 {
                 return Err("fixed32 field truncated".into());
@@ -136,6 +140,19 @@ fn skip_field(bytes: &[u8], pos: &mut usize, wire: u32) -> Result<(), String> {
     }
 }
 
+// A known field sent at the wrong wire type is a hard error. Skipping it would
+// leave the field at its default, so a malformed message would decode into a
+// well-formed one carrying a silently wrong value.
+fn expect_wire(field: u32, name: &str, got: u32, want: u32) -> Result<(), String> {
+    if got != want {
+        return Err(format!(
+            "field {} ({}) has wire type {}, expected {}",
+            field, name, got, want
+        ));
+    }
+    Ok(())
+}
+
 // --- WhisperMessage ---
 
 pub fn decode_whisper(bytes: &[u8]) -> Result<WhisperMessage, String> {
@@ -145,16 +162,46 @@ pub fn decode_whisper(bytes: &[u8]) -> Result<WhisperMessage, String> {
         previous_counter: 0,
         ciphertext: Vec::new(),
     };
+    // Presence is tracked, not inferred from the default: a missing field and a
+    // field legitimately carrying its default must not be indistinguishable.
+    let mut seen_ephemeral_key = false;
+    let mut seen_ciphertext = false;
     let mut pos = 0;
     while pos < bytes.len() {
         let (field, wire) = read_tag(bytes, &mut pos)?;
-        match (field, wire) {
-            (1, 2) => msg.ephemeral_key = read_bytes(bytes, &mut pos)?,
-            (2, 0) => msg.counter = read_varint(bytes, &mut pos)? as u32,
-            (3, 0) => msg.previous_counter = read_varint(bytes, &mut pos)? as u32,
-            (4, 2) => msg.ciphertext = read_bytes(bytes, &mut pos)?,
-            (_, w) => skip_field(bytes, &mut pos, w)?,
+        match field {
+            1 => {
+                expect_wire(field, "ephemeral_key", wire, 2)?;
+                msg.ephemeral_key = read_bytes(bytes, &mut pos)?;
+                seen_ephemeral_key = true;
+            }
+            2 => {
+                expect_wire(field, "counter", wire, 0)?;
+                msg.counter = read_varint(bytes, &mut pos)? as u32;
+            }
+            3 => {
+                expect_wire(field, "previous_counter", wire, 0)?;
+                msg.previous_counter = read_varint(bytes, &mut pos)? as u32;
+            }
+            4 => {
+                expect_wire(field, "ciphertext", wire, 2)?;
+                msg.ciphertext = read_bytes(bytes, &mut pos)?;
+                seen_ciphertext = true;
+            }
+            _ => skip_field(bytes, &mut pos, wire)?,
         }
+    }
+    if !seen_ephemeral_key {
+        return Err("WhisperMessage.ephemeral_key is required".into());
+    }
+    if msg.ephemeral_key.is_empty() {
+        return Err("WhisperMessage.ephemeral_key is empty".into());
+    }
+    if !seen_ciphertext {
+        return Err("WhisperMessage.ciphertext is required".into());
+    }
+    if msg.ciphertext.is_empty() {
+        return Err("WhisperMessage.ciphertext is empty".into());
     }
     Ok(msg)
 }
@@ -183,18 +230,65 @@ pub fn decode_pkmsg(bytes: &[u8]) -> Result<PreKeyWhisperMessage, String> {
         registration_id: 0,
         signed_pre_key_id: None,
     };
+    let mut seen_base_key = false;
+    let mut seen_identity_key = false;
+    let mut seen_message = false;
+    let mut seen_registration_id = false;
     let mut pos = 0;
     while pos < bytes.len() {
         let (field, wire) = read_tag(bytes, &mut pos)?;
-        match (field, wire) {
-            (1, 0) => msg.pre_key_id = Some(read_varint(bytes, &mut pos)? as u32),
-            (2, 2) => msg.base_key = read_bytes(bytes, &mut pos)?,
-            (3, 2) => msg.identity_key = read_bytes(bytes, &mut pos)?,
-            (4, 2) => msg.message = read_bytes(bytes, &mut pos)?,
-            (5, 0) => msg.registration_id = read_varint(bytes, &mut pos)? as u32,
-            (6, 0) => msg.signed_pre_key_id = Some(read_varint(bytes, &mut pos)? as u32),
-            (_, w) => skip_field(bytes, &mut pos, w)?,
+        match field {
+            1 => {
+                expect_wire(field, "pre_key_id", wire, 0)?;
+                msg.pre_key_id = Some(read_varint(bytes, &mut pos)? as u32);
+            }
+            2 => {
+                expect_wire(field, "base_key", wire, 2)?;
+                msg.base_key = read_bytes(bytes, &mut pos)?;
+                seen_base_key = true;
+            }
+            3 => {
+                expect_wire(field, "identity_key", wire, 2)?;
+                msg.identity_key = read_bytes(bytes, &mut pos)?;
+                seen_identity_key = true;
+            }
+            4 => {
+                expect_wire(field, "message", wire, 2)?;
+                msg.message = read_bytes(bytes, &mut pos)?;
+                seen_message = true;
+            }
+            5 => {
+                expect_wire(field, "registration_id", wire, 0)?;
+                msg.registration_id = read_varint(bytes, &mut pos)? as u32;
+                seen_registration_id = true;
+            }
+            6 => {
+                expect_wire(field, "signed_pre_key_id", wire, 0)?;
+                msg.signed_pre_key_id = Some(read_varint(bytes, &mut pos)? as u32);
+            }
+            _ => skip_field(bytes, &mut pos, wire)?,
         }
+    }
+    if !seen_base_key {
+        return Err("PreKeyWhisperMessage.base_key is required".into());
+    }
+    if msg.base_key.is_empty() {
+        return Err("PreKeyWhisperMessage.base_key is empty".into());
+    }
+    if !seen_identity_key {
+        return Err("PreKeyWhisperMessage.identity_key is required".into());
+    }
+    if msg.identity_key.is_empty() {
+        return Err("PreKeyWhisperMessage.identity_key is empty".into());
+    }
+    if !seen_message {
+        return Err("PreKeyWhisperMessage.message is required".into());
+    }
+    if msg.message.is_empty() {
+        return Err("PreKeyWhisperMessage.message is empty".into());
+    }
+    if !seen_registration_id {
+        return Err("PreKeyWhisperMessage.registration_id is required".into());
     }
     Ok(msg)
 }
@@ -223,6 +317,14 @@ pub fn encode_pkmsg(msg: &PreKeyWhisperMessage) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // No Debug on the message structs, so unwrap_err() is unavailable.
+    fn decode_err<T>(r: Result<T, String>) -> String {
+        match r {
+            Ok(_) => panic!("the message must be rejected"),
+            Err(e) => e,
+        }
+    }
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -318,6 +420,155 @@ mod tests {
         let encoded = encode_whisper(&msg).unwrap();
         let expected = hex("0a0361626310ac021800220378797a");
         assert_eq!(encoded, expected);
+    }
+
+    // --- structural validation ---
+
+    // --- structural validation ---
+    //
+    // The wire bytes below are written out in full so a reader can check them
+    // against protobuf.dev by eye. A well-formed message is:
+    //   WhisperMessage   field1 ephemeral_key="abc"   field2 counter=1
+    //                     field3 previous_counter=0   field4 ciphertext="xyz"
+    //   PreKeyWhisper    field1 pre_key_id=1          field2 base_key=[0xEE]
+    //                     field3 identity_key=[0xFF]  field4 message=[0x10]
+    //                     field5 registration_id=42
+
+    #[test]
+    fn whisper_without_ephemeral_key_is_rejected() {
+        let err = decode_err(decode_whisper(&hex("10011800220378797a")));
+        assert!(
+            err.contains("ephemeral_key"),
+            "a missing ephemeral_key must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn whisper_without_ciphertext_is_rejected() {
+        let err = decode_err(decode_whisper(&hex("0a0361626310011800")));
+        assert!(
+            err.contains("ciphertext"),
+            "a missing ciphertext must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn whisper_with_empty_ciphertext_is_rejected() {
+        let err = decode_err(decode_whisper(&hex("0a03616263100118002200")));
+        assert!(
+            err.contains("ciphertext"),
+            "a zero-length ciphertext must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn whisper_ephemeral_key_at_wrong_wire_type_is_rejected() {
+        // field1 at wire type 0 (varint) rather than 2 (length-delimited).
+        let err = decode_err(decode_whisper(&hex("082a10011800220378797a")));
+        assert!(
+            err.contains("ephemeral_key"),
+            "a known field at the wrong wire type must be named, not defaulted, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn whisper_known_field_at_wrong_wire_type_is_rejected() {
+        // field2 (counter, a varint) sent at wire type 2.
+        let err = decode_err(decode_whisper(&hex("0a036162631201051800220378797a")));
+        assert!(
+            err.contains("counter"),
+            "a known field at the wrong wire type must be a hard error, not a skip, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn whisper_of_only_unknown_fields_is_rejected() {
+        // field7 at wire type 2, length 0: a legal unknown field, and no message.
+        let err = decode_err(decode_whisper(&hex("3a00")));
+        assert!(
+            err.contains("ephemeral_key") || err.contains("ciphertext"),
+            "a message with no required field present must be rejected, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn whisper_group_wire_type_is_rejected_clearly() {
+        // field7 at wire type 3 (start group), closed by wire type 4. Skipping a
+        // group is not implemented, so the message must be refused outright
+        // rather than mis-parsed as if the group were absent.
+        let err = decode_err(decode_whisper(&hex("0a0361626310011800220378797a3b3c")));
+        assert!(
+            err.contains("group"),
+            "an unsupported group must be refused with a clear error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn pkmsg_without_registration_id_is_rejected() {
+        let err = decode_err(decode_pkmsg(&hex("08011201ee1a01ff220110")));
+        assert!(
+            err.contains("registration_id"),
+            "an absent registration_id must not silently become 0, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn pkmsg_without_base_key_is_rejected() {
+        let err = decode_err(decode_pkmsg(&hex("08011a01ff220110282a")));
+        assert!(
+            err.contains("base_key"),
+            "a missing base_key must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn pkmsg_without_message_is_rejected() {
+        let err = decode_err(decode_pkmsg(&hex("08011201ee1a01ff282a")));
+        assert!(
+            err.contains("message"),
+            "a missing message must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn pkmsg_with_pre_key_id_and_empty_message_is_rejected() {
+        let err = decode_err(decode_pkmsg(&hex("08011201ee1a01ff2200282a")));
+        assert!(
+            err.contains("message"),
+            "a pkmsg carrying no payload must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn pkmsg_of_only_unknown_fields_is_rejected() {
+        let err = decode_err(decode_pkmsg(&hex("3a00")));
+        assert!(
+            err.contains("base_key") || err.contains("message"),
+            "a pkmsg with no required field present must be rejected, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn pkmsg_known_field_at_wrong_wire_type_is_rejected() {
+        // field5 (registration_id, a varint) sent at wire type 2.
+        let err = decode_err(decode_pkmsg(&hex("08011201ee1a01ff2201102a012a")));
+        assert!(
+            err.contains("registration_id"),
+            "a known field at the wrong wire type must be a hard error, not a skip, got: {}",
+            err
+        );
     }
 
     #[test]

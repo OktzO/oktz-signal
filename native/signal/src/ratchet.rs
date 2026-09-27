@@ -23,6 +23,13 @@ use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Upper bound on the wire counter accepted before the MAC is checked. The
+/// sender is unauthenticated at this point and fully controls msg.counter, so
+/// without this an attacker buys up to 2000 HMAC steps and ~120 KB of base64
+/// keys per forged message. fill_message_keys keeps its own 2000 skip cap as
+/// the outer bound on relative distance.
+const MAX_UNAUTHENTICATED_COUNTER: u32 = 2000;
+
 // AES-256-CBC (32-byte key) encrypt, manual (block-modes 0.9.1 is deprecated-empty).
 fn aes_cbc_encrypt(key: &[u8], iv: &[u8; 16], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let cipher = Aes256::new_from_slice(key).map_err(|e| format!("AES key: {}", e))?;
@@ -62,9 +69,19 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8; 16], ciphertext: &[u8]) -> Result<Vec<u
         out.extend_from_slice(&dec);
         prev = block.into();
     }
-    // PKCS7 unpad
-    let pad = *out.last().ok_or("empty decrypt")? as usize;
-    if pad == 0 || pad > 16 || out.len() < pad {
+    // PKCS7 unpad. Every one of the last `pad` bytes must equal `pad`; only the
+    // final one was read before, so a forged padding block passed. Compare all
+    // of them without an early exit, and report every failure the same way.
+    let pad = *out.last().ok_or("invalid padding")? as usize;
+    let mut diff = 0u8;
+    if pad > 0 && pad <= 16 && out.len() >= pad {
+        for &b in &out[out.len() - pad..] {
+            diff |= b ^ pad as u8;
+        }
+    } else {
+        diff = 1;
+    }
+    if diff != 0 {
         return Err("invalid padding".to_string());
     }
     out.truncate(out.len() - pad);
@@ -272,7 +289,11 @@ pub fn encrypt(
         .find(|c| c.chainType == 1)
         .ok_or("no sending chain")?;
 
-    let target_counter = chain.chainKey.counter + 1;
+    let target_counter = chain
+        .chainKey
+        .counter
+        .checked_add(1)
+        .ok_or("message counter overflow")?;
     fill_message_keys(chain, target_counter)?;
     let message_key_b64 = chain
         .messageKeys
@@ -287,7 +308,8 @@ pub fn encrypt(
 
     let whisper_msg = proto::WhisperMessage {
         ephemeral_key,
-        counter: target_counter as u32,
+        counter: u32::try_from(target_counter)
+            .map_err(|_| "message counter does not fit the u32 wire field".to_string())?,
         previous_counter,
         ciphertext,
     };
@@ -376,6 +398,9 @@ pub fn decrypt_whisper(
     // Step the receiving chain IN PLACE (no full-chain clone; a chain can hold
     // up to 2000 skipped message keys). On any error the whole record is
     // discarded by the caller, so mid-flight mutation is safe to keep.
+    if msg.counter > MAX_UNAUTHENTICATED_COUNTER {
+        return Err("message counter out of range".to_string());
+    }
     let message_key_b64 = {
         let chain = entry
             .chains
@@ -600,6 +625,120 @@ mod tests {
         chunks_are_zeroizing(&secrets);
         assert_eq!(secrets.len(), 2);
         assert_eq!(secrets[0].len(), 32);
+    }
+
+    #[test]
+    fn encrypt_rejects_counter_overflow() {
+        let (alice, _, alice_id, _) = build_pair();
+        let mut record: SessionRecord = session::deserialize(&alice).unwrap();
+        let entry = record.sessions.values_mut().next().unwrap();
+        entry
+            .chains
+            .values_mut()
+            .find(|c| c.chainType == 1)
+            .unwrap()
+            .chainKey
+            .counter = i64::MAX;
+        let json = session::serialize(&record).unwrap();
+        assert!(
+            encrypt(&json, b"overflow", &alice_id, 42).is_err(),
+            "counter overflow must return an error, not panic or wrap"
+        );
+    }
+
+    #[test]
+    fn encrypt_rejects_counter_beyond_wire_range() {
+        let (alice, _, alice_id, _) = build_pair();
+        let mut record: SessionRecord = session::deserialize(&alice).unwrap();
+        let entry = record.sessions.values_mut().next().unwrap();
+        entry
+            .chains
+            .values_mut()
+            .find(|c| c.chainType == 1)
+            .unwrap()
+            .chainKey
+            .counter = 0x1_0000_0000;
+        let json = session::serialize(&record).unwrap();
+        let err = match encrypt(&json, b"truncation", &alice_id, 42) {
+            Ok(_) => panic!("a counter that does not fit the u32 wire field must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("counter"),
+            "a counter that does not fit the u32 wire field must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn decrypt_rejects_absurd_counter_before_deriving_keys() {
+        let (_, bob, _, bob_id) = build_pair();
+        let record: SessionRecord = session::deserialize(&bob).unwrap();
+        let entry = record.sessions.values().next().unwrap();
+        let recv_key = crate::util::unb64(
+            entry
+                .chains
+                .iter()
+                .find(|(_, c)| c.chainType == 0)
+                .map(|(k, _)| k)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let msg = proto::WhisperMessage {
+            ephemeral_key: recv_key,
+            counter: 100_000,
+            previous_counter: 0,
+            ciphertext: vec![0u8; 32],
+        };
+        let msg_buf = proto::encode_whisper(&msg).unwrap();
+        let mut wire = vec![0x33];
+        wire.extend_from_slice(&msg_buf);
+        wire.extend_from_slice(&[0u8; 8]); // deliberately wrong MAC
+
+        let err = match decrypt_whisper(&bob, &wire, &bob_id) {
+            Ok(_) => panic!("an unauthenticated counter of 100000 must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("counter"),
+            "an unauthenticated counter must be bounded before any key derivation, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn unpad_rejects_inconsistent_pad_bytes() {
+        let key = [0x11u8; 32];
+        let iv = [0u8; 16];
+        // 16 bytes of plaintext get a full 16-byte 0x10 pad block. Flipping a bit
+        // in the *first* block desynchronises the first pad byte of the final
+        // block from the last one; only the last byte is read today, so this
+        // malformed padding is accepted.
+        let mut ct = aes_cbc_encrypt(&key, &iv, &[0xAAu8; 16]).unwrap();
+        ct[1] ^= 0xFF;
+        assert!(
+            aes_cbc_decrypt(&key, &iv, &ct).is_err(),
+            "PKCS#7 unpad must check every pad byte, not just the last"
+        );
+    }
+
+    #[test]
+    fn unpad_failures_share_one_error_string() {
+        let key = [0x11u8; 32];
+        let iv = [0u8; 16];
+        // pad byte of 0 (out of range) versus pad bytes that disagree (invalid
+        // content). One string, so the error cannot tell an attacker which
+        // condition tripped.
+        let mut zero_pad = aes_cbc_encrypt(&key, &iv, &[0xAAu8; 15]).unwrap();
+        zero_pad[14] ^= 0x01;
+        let a = aes_cbc_decrypt(&key, &iv, &zero_pad).unwrap_err();
+
+        let mut bad_pad = aes_cbc_encrypt(&key, &iv, &[0xAAu8; 16]).unwrap();
+        bad_pad[1] ^= 0xFF;
+        let b = aes_cbc_decrypt(&key, &iv, &bad_pad).unwrap_err();
+
+        assert_eq!(a, b, "unpad failures must not be distinguishable");
     }
 
     #[test]

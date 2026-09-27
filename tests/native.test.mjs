@@ -110,7 +110,8 @@ const FIXTURE = readFileSync(
   const sig = n.curveSign(recipPriv, signedPrekeyPub, null);
   strictEqual(sig.length, 64);
 
-  const recipientPrekey = Buffer.alloc(32, 0x45);
+  // The recipient signed prekey is one key: recipient_prekey must be it.
+  const recipientPrekey = signedPrekeyPub;
 
   const sessionJson = n.x3DhBuildInitialSession(
     identityPriv,
@@ -147,7 +148,8 @@ const FIXTURE = readFileSync(
   const signedPrekeyPub = Buffer.alloc(32, 0x43);
   const sig = n.curveSign(recipPriv, signedPrekeyPub, null);
 
-  const recipientPrekey = Buffer.alloc(32, 0x45);
+  // The recipient signed prekey is one key: recipient_prekey must be it.
+  const recipientPrekey = signedPrekeyPub;
 
   const sessionJson = n.x3DhBuildInitialSession(
     identityPriv, identityPub,

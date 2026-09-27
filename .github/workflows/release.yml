@@ -63,7 +63,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - run: npm ci
       - name: Build host binding for the test suite
-        run: npm exec -- napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs -- --locked
+        run: npm exec -- napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --no-js -- --locked
       - name: Run the test suite that gates this publish
         run: npm run test:all
   publish:

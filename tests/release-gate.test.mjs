@@ -233,3 +233,21 @@ test('publishing the android artifact requires a real termux job result', () => 
     }
   }
 });
+
+test('no workflow regenerates the committed loader in a job that runs the test suite', () => {
+  // `napi build --js index.cjs` overwrites native/signal/index.cjs with a
+  // freshly generated one, which drops the hand-added
+  // `module.exports.default = nativeBinding` that
+  // tests/platform-loader.test.mjs asserts via `native.default === native`.
+  // The release publishes the committed loader as-is, so a gate must not
+  // rebuild it either.
+  for (const name of NAMES) {
+    for (const [id, job] of Object.entries(parse(name).jobs)) {
+      if (!RUNS_TESTS.test(runText(job))) continue;
+      for (const step of steps(job)) {
+        assert.ok(!/--js[= ]+\S*index\.cjs/.test(step.run ?? ''),
+          `${name}: job \`${id}\` step \`${step.name ?? step.run}\` regenerates the committed index.cjs, dropping the line the suite asserts on`);
+      }
+    }
+  }
+});

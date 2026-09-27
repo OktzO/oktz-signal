@@ -149,7 +149,13 @@ fn default_version() -> String {
 }
 
 // Parse without validating, for callers that want the raw projection.
+// serde reads a struct from a JSON array positionally and both SessionRecord
+// fields are `default`, so "[]" used to yield an empty record with no error —
+// a silent state reset. Require a JSON object before handing it to serde.
 pub fn parse(json: &str) -> Result<SessionRecord, String> {
+    if !json.trim_start().starts_with('{') {
+        return Err("session record must be a JSON object".to_string());
+    }
     serde_json::from_str(json).map_err(|e| e.to_string())
 }
 
@@ -450,5 +456,26 @@ mod tests {
         v.as_object_mut().unwrap().remove("version");
         let record = deserialize(&v.to_string()).unwrap();
         assert_eq!(record.version, "v1");
+    }
+
+    #[test]
+    fn non_object_session_json_is_rejected() {
+        // serde reads a struct from a JSON array positionally, and both
+        // SessionRecord fields are `default`, so "[]" filled both of them and
+        // produced an empty record with no error — a silent state reset.
+        for input in ["[]", "[ ]", "[\"v1\"]", "[1, 2, 3]", "  []  "] {
+            assert!(
+                parse(input).is_err(),
+                "{} must not parse as a session record",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn an_object_is_still_parsed() {
+        let record = parse(r#"{"version":"v1"}"#).unwrap();
+        assert_eq!(record.version, "v1");
+        assert!(record.sessions.is_empty());
     }
 }

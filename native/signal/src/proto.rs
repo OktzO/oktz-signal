@@ -87,6 +87,16 @@ fn read_bytes(bytes: &[u8], pos: &mut usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// Every varint field on the wire is declared u32. `as u32` truncates silently:
+// a previous_counter of 2^33 becomes 0, which flows into fill_message_keys so
+// the receiver never derives the previous chain's skipped keys and those
+// messages become permanently undecryptable. Range-check instead.
+fn read_varint_u32(bytes: &[u8], pos: &mut usize, name: &str) -> Result<u32, String> {
+    let value = read_varint(bytes, pos)?;
+    u32::try_from(value)
+        .map_err(|_| format!("{} of {} does not fit the u32 wire field", name, value))
+}
+
 fn write_bytes(buf: &mut Vec<u8>, data: &[u8]) {
     write_varint(buf, data.len() as u64);
     buf.extend_from_slice(data);
@@ -177,11 +187,11 @@ pub fn decode_whisper(bytes: &[u8]) -> Result<WhisperMessage, String> {
             }
             2 => {
                 expect_wire(field, "counter", wire, 0)?;
-                msg.counter = read_varint(bytes, &mut pos)? as u32;
+                msg.counter = read_varint_u32(bytes, &mut pos, "counter")?;
             }
             3 => {
                 expect_wire(field, "previous_counter", wire, 0)?;
-                msg.previous_counter = read_varint(bytes, &mut pos)? as u32;
+                msg.previous_counter = read_varint_u32(bytes, &mut pos, "previous_counter")?;
             }
             4 => {
                 expect_wire(field, "ciphertext", wire, 2)?;
@@ -240,7 +250,7 @@ pub fn decode_pkmsg(bytes: &[u8]) -> Result<PreKeyWhisperMessage, String> {
         match field {
             1 => {
                 expect_wire(field, "pre_key_id", wire, 0)?;
-                msg.pre_key_id = Some(read_varint(bytes, &mut pos)? as u32);
+                msg.pre_key_id = Some(read_varint_u32(bytes, &mut pos, "pre_key_id")?);
             }
             2 => {
                 expect_wire(field, "base_key", wire, 2)?;
@@ -259,12 +269,12 @@ pub fn decode_pkmsg(bytes: &[u8]) -> Result<PreKeyWhisperMessage, String> {
             }
             5 => {
                 expect_wire(field, "registration_id", wire, 0)?;
-                msg.registration_id = read_varint(bytes, &mut pos)? as u32;
+                msg.registration_id = read_varint_u32(bytes, &mut pos, "registration_id")?;
                 seen_registration_id = true;
             }
             6 => {
                 expect_wire(field, "signed_pre_key_id", wire, 0)?;
-                msg.signed_pre_key_id = Some(read_varint(bytes, &mut pos)? as u32);
+                msg.signed_pre_key_id = Some(read_varint_u32(bytes, &mut pos, "signed_pre_key_id")?);
             }
             _ => skip_field(bytes, &mut pos, wire)?,
         }
@@ -569,6 +579,89 @@ mod tests {
             "a known field at the wrong wire type must be a hard error, not a skip, got: {}",
             err
         );
+    }
+
+    // --- varint range ---
+    //
+    // The writers below are the module's own, so the varint under test is
+    // exactly the value named rather than a hand-counted byte string. The
+    // writers are pinned independently by the two known-answer tests above.
+
+    fn whisper_with(field: u32, value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_tag(&mut out, 1, 2);
+        write_bytes(&mut out, b"abc");
+        write_tag(&mut out, 2, 0);
+        write_varint(&mut out, 1);
+        write_tag(&mut out, 3, 0);
+        write_varint(&mut out, 0);
+        write_tag(&mut out, field, 0);
+        write_varint(&mut out, value);
+        write_tag(&mut out, 4, 2);
+        write_bytes(&mut out, b"xyz");
+        out
+    }
+
+    fn pkmsg_with(field: u32, value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_tag(&mut out, 2, 2);
+        write_bytes(&mut out, &[0xEE]);
+        write_tag(&mut out, 3, 2);
+        write_bytes(&mut out, &[0xFF]);
+        write_tag(&mut out, 4, 2);
+        write_bytes(&mut out, &[0x10]);
+        write_tag(&mut out, 5, 0);
+        write_varint(&mut out, 42);
+        // Every required field is present, and the oversized varint comes last
+        // so it wins under last-occurrence-wins. Without this the presence
+        // check trips first and the range check is never reached.
+        write_tag(&mut out, field, 0);
+        write_varint(&mut out, value);
+        out
+    }
+
+    #[test]
+    fn whisper_varint_beyond_u32_is_rejected() {
+        // 2^33 truncates to 0 under `as u32`, and previous_counter feeds
+        // fill_message_keys, so the receiver never derives the previous
+        // chain's skipped keys and those messages become permanently
+        // undecryptable. A counter of u64::MAX truncates to u32::MAX.
+        for (field, name, value) in [
+            (2u32, "counter", u64::MAX),
+            (2, "counter", 1u64 << 33),
+            (3, "previous_counter", 1u64 << 33),
+            (3, "previous_counter", u64::MAX),
+        ] {
+            let err = decode_err(decode_whisper(&whisper_with(field, value)));
+            assert!(
+                err.contains(name),
+                "{} of {} does not fit the u32 wire field and must be named, got: {}",
+                name,
+                value,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn pkmsg_varint_beyond_u32_is_rejected() {
+        for (field, name) in [(1u32, "pre_key_id"), (5, "registration_id"), (6, "signed_pre_key_id")]
+        {
+            let err = decode_err(decode_pkmsg(&pkmsg_with(field, 1u64 << 33)));
+            assert!(
+                err.contains(name),
+                "{} of 2^33 does not fit the u32 wire field and must be named, got: {}",
+                name,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn whisper_varint_at_the_u32_boundary_is_accepted() {
+        // The check must be a range check, not a rejection of large values.
+        let decoded = decode_whisper(&whisper_with(3, u32::MAX as u64)).unwrap();
+        assert_eq!(decoded.previous_counter, u32::MAX);
     }
 
     #[test]

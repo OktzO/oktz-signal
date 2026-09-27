@@ -67,7 +67,12 @@ const isMuslFromReport = () => {
 
 const isMuslFromChildProcess = () => {
   try {
-    return require('child_process').execSync('ldd --version', { encoding: 'utf8' }).includes('musl')
+    // hand-maintained patch, not emitted by `napi build`: stdin and stderr are
+    // discarded. execSync's default stdio inherits them from this process, so
+    // a failed probe printed the shell's own diagnostics into the host
+    // application's stderr -- noise attributed to the host, from a probe whose
+    // only output of interest is the stdout captured below.
+    return require('child_process').execSync('ldd --version', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).includes('musl')
   } catch (e) {
     // If we reach this case, we don't know if the system is musl or not, so is better to just fallback to false
     return false

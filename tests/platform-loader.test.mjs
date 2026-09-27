@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -267,4 +267,38 @@ test('the report probe restores excludeNetwork to its prior value', () => {
   const report = { excludeNetwork: undefined, getReport: () => ({ header: { glibcVersionRuntime: '2.39' } }) };
   runLoader({ lddThrows: true, report });
   assert.equal(report.excludeNetwork, undefined);
+});
+
+test('a failing libc probe does not write to the parent process stderr', () => {
+  // isMuslFromChildProcess() is the last of the three musl probes, reached
+  // only when /usr/bin/ldd is unreadable and process.report is unavailable.
+  // A fake ldd on an otherwise empty PATH both proves the probe ran and
+  // produces stderr, which execSync's default stdio inherits from the parent.
+  const bin = mkdtempSync(join(tmpdir(), 'oktz-signal-bin-'));
+  const marker = join(bin, 'ran');
+  writeFileSync(join(bin, 'ldd'), `#!/bin/sh\necho ran >> ${marker}\necho 'ldd (GNU libc) 2.39'\necho 'fake-ldd-stderr-noise' >&2\n`, { mode: 0o755 });
+  const source = `
+    const fs = require('fs')
+    const realReadFileSync = fs.readFileSync
+    fs.readFileSync = function (path, ...rest) {
+      if (path === '/usr/bin/ldd') { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e }
+      return realReadFileSync.call(this, path, ...rest)
+    }
+    Object.defineProperty(process, 'report', { value: null, configurable: true })
+    require(${JSON.stringify(loaderPath)})
+    console.log('parent-stdout-marker')
+  `;
+  try {
+    const result = spawnSync(process.execPath, ['--eval', source], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: bin },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /parent-stdout-marker/);
+    assert.ok(existsSync(marker), 'the ldd probe never ran, so this test proved nothing');
+    assert.equal(result.stderr, '', 'the libc probe wrote to the parent process stderr');
+  } finally {
+    rmSync(bin, { force: true, recursive: true });
+  }
 });

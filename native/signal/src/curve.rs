@@ -182,6 +182,15 @@ pub fn verify(public_key: &[u8], msg: &[u8], signature: &[u8]) -> Result<bool, S
 // CATATAN: dalek 4.1.x menghapus modul `x25519` (StaticSecret dkk). Pakai
 // MontgomeryPoint::mul_base_clamped / mul_clamped — clamping RFC 7748 sama.
 
+/// Seed carries no usable entropy. Clamping maps a constant seed to a valid
+/// scalar, so it yields a publicly known private key. A random 32-byte seed
+/// averages 128 bits set (sd ~8); reject the two constant bit patterns and
+/// anything with too little weight to be entropy.
+fn seed_is_degenerate(seed: &[u8; 32]) -> bool {
+    let bits: u32 = seed.iter().map(|b| b.count_ones()).sum();
+    bits <= 32 || bits == 256
+}
+
 /// generate_keypair(seed) → (public_key, secret_key) 32 byte (X25519)
 ///
 /// Sesuai ruling plan: generate keypair untuk X3DH (identity key, signed
@@ -189,6 +198,9 @@ pub fn verify(public_key: &[u8], msg: &[u8], signature: &[u8]) -> Result<bool, S
 pub fn generate_keypair(seed: &[u8]) -> Result<([u8; 32], [u8; 32]), String> {
     check_len(seed, 32, "seed")?;
     let seed32: [u8; 32] = seed[..32].try_into().unwrap();
+    if seed_is_degenerate(&seed32) {
+        return Err("seed is degenerate: not enough entropy for a private key".to_string());
+    }
     let public = MontgomeryPoint::mul_base_clamped(seed32);
     Ok((public.to_bytes(), seed32))
 }
@@ -263,11 +275,37 @@ mod tests {
 
     #[test]
     fn test_verify_rejects_tampered() {
-        let sk = [0x01u8; 32];
+        // [0x01; 32] is a degenerate seed (one bit per byte) and is now
+        // rejected by generate_keypair; the assertion under test is about
+        // tampering, not about the seed.
+        let sk = [0x37u8; 32];
         let msg = b"integrity check";
         let sig = sign(&sk, msg, None).unwrap();
         let (pk, _) = generate_keypair(&sk).unwrap();
         assert!(!verify(&pk, b"tampered", &sig).unwrap());
+    }
+
+    #[test]
+    fn test_generate_keypair_rejects_degenerate_seeds() {
+        // Clamping turns a constant seed into a valid scalar, so
+        // curveGenerateKeypair(Buffer.alloc(32)) returns a publicly known
+        // private key. The same holds for any seed carrying no usable entropy.
+        let mut low_bit = [0u8; 32];
+        low_bit[0] = 0x01;
+        let mut high_bit = [0u8; 32];
+        high_bit[31] = 0x80;
+        for (name, seed) in [
+            ("all-zero", [0u8; 32]),
+            ("all-0xFF", [0xFFu8; 32]),
+            ("one bit at the bottom", low_bit),
+            ("one bit at the top", high_bit),
+            ("one bit per byte", [1u8; 32]),
+        ] {
+            match generate_keypair(&seed) {
+                Ok(_) => panic!("{} seed must be rejected", name),
+                Err(e) => assert!(e.contains("seed"), "{}: error must name the seed, got: {}", name, e),
+            }
+        }
     }
 
     #[test]

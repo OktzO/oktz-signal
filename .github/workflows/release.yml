@@ -5,12 +5,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      termux_test_passed:
-        type: boolean
-        description: 'Android Termux runtime test passed'
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -102,10 +96,11 @@ jobs:
         with:
           name: signal-linux-arm64-musl
           path: npm/linux-arm64-musl
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: signal-android-arm64
-          path: npm/android-arm64
+      # android-arm64 is still cross-compiled and uploaded as an artifact, but
+      # it is deliberately NOT published. A `workflow_dispatch` boolean stood
+      # in for a Termux run that does not exist, so nothing had ever loaded
+      # this .node before it shipped. Do not re-add the publish step without a
+      # job that actually executes the binary on an Android runtime.
       - name: Verify publish tarballs
         run: |
           npm pack --dry-run
@@ -113,7 +108,6 @@ jobs:
           npm pack --dry-run --prefix npm/linux-x64-musl
           npm pack --dry-run --prefix npm/linux-arm64-gnu
           npm pack --dry-run --prefix npm/linux-arm64-musl
-          npm pack --dry-run --prefix npm/android-arm64
       - name: Publish Linux platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -122,11 +116,6 @@ jobs:
           npm publish --ignore-scripts --provenance npm/linux-x64-musl
           npm publish --ignore-scripts --provenance npm/linux-arm64-gnu
           npm publish --ignore-scripts --provenance npm/linux-arm64-musl
-      - name: Publish Android platform package
-        if: ${{ inputs.termux_test_passed == 'true' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --ignore-scripts --provenance npm/android-arm64
       - name: Publish main package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -189,3 +189,47 @@ test('every action is pinned to a full commit SHA', () => {
     }
   }
 });
+
+const dispatchInputs = (doc) => doc.on?.workflow_dispatch?.inputs ?? {};
+const body = (doc) => JSON.stringify({ ...doc, on: undefined });
+
+test('no release gate is a self-attested workflow_dispatch input', () => {
+  // A `workflow_dispatch` boolean is a human saying "yes, the Termux test
+  // passed". Nothing in the workflow can check that, so the gate proves
+  // nothing about the bytes being published.
+  for (const name of NAMES) {
+    for (const [id, job] of Object.entries(parse(name).jobs)) {
+      for (const step of steps(job)) {
+        assert.ok(!/\binputs\./.test(step.if ?? ''),
+          `${name}: job \`${id}\` step \`${step.name ?? step.run}\` is gated on \`${step.if}\`, a value a human typed`);
+      }
+    }
+  }
+});
+
+test('every declared workflow_dispatch input is actually read', () => {
+  for (const name of NAMES) {
+    const doc = parse(name);
+    const declared = Object.keys(dispatchInputs(doc));
+    for (const input of declared) {
+      assert.ok(body(doc).includes(input),
+        `${name}: declares workflow_dispatch input \`${input}\` and never reads it`);
+    }
+  }
+});
+
+test('publishing the android artifact requires a real termux job result', () => {
+  const doc = parse('release.yml');
+  const android = publishSteps(doc).filter(({ step }) => /android-arm64/.test(step.run));
+  if (android.length === 0) return;
+
+  for (const { job, step } of android) {
+    const termux = [...ancestors(doc, job)].filter((id) => /termux/i.test(id));
+    assert.notDeepEqual(termux, [],
+      `release.yml publishes \`${step.run.trim()}\` from \`${job}\` with no termux job in its needs`);
+    for (const id of termux) {
+      assert.match(runText(doc.jobs[id]), /termux/i,
+        `release.yml job \`${id}\` is named for termux but never runs anything on termux`);
+    }
+  }
+});

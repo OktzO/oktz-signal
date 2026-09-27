@@ -12,6 +12,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -29,13 +30,14 @@ pub struct X3dhParams<'a> {
 }
 
 /// deriveSecrets pattern (RFC 5869, 3 chunks) — same as libsignal crypto.js.
-fn derive_secrets(input: &[u8], salt: &[u8], info: &[u8]) -> Result<[Vec<u8>; 3], String> {
+/// Chunks are Zeroizing: they carry the root key and the first chain key.
+fn derive_secrets(input: &[u8], salt: &[u8], info: &[u8]) -> Result<[Zeroizing<Vec<u8>>; 3], String> {
     let prk = {
         let mut mac = HmacSha256::new_from_slice(salt).map_err(|e| e.to_string())?;
         mac.update(input);
         mac.finalize().into_bytes()
     };
-    let mut out = [Vec::new(), Vec::new(), Vec::new()];
+    let mut out: [Zeroizing<Vec<u8>>; 3] = Default::default();
     let mut prev = Vec::new();
     for (i, slot) in out.iter_mut().enumerate() {
         let mut mac = HmacSha256::new_from_slice(prk.as_ref()).map_err(|e| e.to_string())?;
@@ -43,7 +45,7 @@ fn derive_secrets(input: &[u8], salt: &[u8], info: &[u8]) -> Result<[Vec<u8>; 3]
         mac.update(info);
         mac.update(&[(i + 1) as u8]);
         let chunk = mac.finalize().into_bytes().to_vec();
-        *slot = chunk.clone();
+        *slot = Zeroizing::new(chunk.clone());
         prev = chunk;
     }
     Ok(out)
@@ -99,7 +101,7 @@ pub(crate) fn build_initial_session_with_ephemeral(
     // 4. Shared secret: 0xff*32 || a1 || a2 || a3 [|| a4].
     let has_opk = params.prekey_pub.is_some();
     let len = if has_opk { 160 } else { 128 };
-    let mut shared = vec![0u8; len];
+    let mut shared = Zeroizing::new(vec![0u8; len]);
     for i in 0..32 {
         shared[i] = 0xff;
     }
@@ -212,7 +214,7 @@ pub fn build_recipient_session(
 
     let has_opk = our_prekey_priv.is_some();
     let len = if has_opk { 160 } else { 128 };
-    let mut shared = vec![0u8; len];
+    let mut shared = Zeroizing::new(vec![0u8; len]);
     for i in 0..32 {
         shared[i] = 0xff;
     }

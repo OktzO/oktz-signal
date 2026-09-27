@@ -19,6 +19,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::Sha256;
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -77,7 +78,14 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 // N-chunk HKDF (RFC 5869 Extract-then-Expand) — same as libsignal deriveSecrets.
-pub(crate) fn derive_secrets_n(input: &[u8], salt: &[u8], info: &[u8], n: usize) -> Result<Vec<Vec<u8>>, String> {
+// Chunks are Zeroizing: they are the derived AES/MAC keys and IV, so they must
+// be scrubbed rather than left in the heap when the caller's scope ends.
+pub(crate) fn derive_secrets_n(
+    input: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    n: usize,
+) -> Result<Vec<Zeroizing<Vec<u8>>>, String> {
     let prk = {
         let mut mac = <HmacSha256 as Mac>::new_from_slice(salt).map_err(|e| e.to_string())?;
         mac.update(input);
@@ -92,7 +100,7 @@ pub(crate) fn derive_secrets_n(input: &[u8], salt: &[u8], info: &[u8], n: usize)
         mac.update(info);
         mac.update(&[(i + 1) as u8]);
         let chunk = mac.finalize().into_bytes().to_vec();
-        out.push(chunk.clone());
+        out.push(Zeroizing::new(chunk.clone()));
         prev = chunk;
     }
     Ok(out)
@@ -119,9 +127,9 @@ fn fill_message_keys(chain: &mut Chain, counter: i64) -> Result<(), String> {
     if counter - chain.chainKey.counter > 2000 {
         return Err("Over 2000 messages into the future!".to_string());
     }
-    let ck = crate::util::unb64(&chain.chainKey.key)?;
-    let message_key = hmac_sha256(&ck, &[0x01]);
-    let next_chain_key = hmac_sha256(&ck, &[0x02]);
+    let ck = Zeroizing::new(crate::util::unb64(&chain.chainKey.key)?);
+    let message_key = Zeroizing::new(hmac_sha256(&ck, &[0x01]));
+    let next_chain_key = Zeroizing::new(hmac_sha256(&ck, &[0x02]));
     chain.messageKeys.insert(
         chain.chainKey.counter + 1,
         crate::util::b64(&message_key),
@@ -161,10 +169,10 @@ pub(crate) fn maybe_step_ratchet(
     }
 
     // 2. Receiving chain.
-    let ratchet_priv = crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.privKey)?;
-    let shared = curve::scalar_multiply(&ratchet_priv, &remote_key)?;
+    let ratchet_priv = Zeroizing::new(crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.privKey)?);
+    let shared = Zeroizing::new(curve::scalar_multiply(&ratchet_priv, &remote_key)?);
     let root_key = crate::util::unb64(&entry.currentRatchet.rootKey)?;
-    let mk_recv = derive_secrets_n(&shared, &root_key, b"WhisperRatchet", 2)?;
+    let mk_recv = derive_secrets_n(&shared[..], &root_key, b"WhisperRatchet", 2)?;
     entry.currentRatchet.rootKey = crate::util::b64(&mk_recv[0]);
 
     entry.chains.insert(
@@ -196,9 +204,9 @@ pub(crate) fn maybe_step_ratchet(
     entry.currentRatchet.lastRemoteEphemeralKey = remote_key_b64.to_string();
 
     // 4. Sending chain: DH(new_priv, remoteKey) with the updated root key.
-    let shared_send = curve::scalar_multiply(&new_priv, &remote_key)?;
+    let shared_send = Zeroizing::new(curve::scalar_multiply(&new_priv, &remote_key)?);
     let root_send = crate::util::unb64(&entry.currentRatchet.rootKey)?;
-    let mk_send = derive_secrets_n(&shared_send, &root_send, b"WhisperRatchet", 2)?;
+    let mk_send = derive_secrets_n(&shared_send[..], &root_send, b"WhisperRatchet", 2)?;
     entry.currentRatchet.rootKey = crate::util::b64(&mk_send[0]);
 
     entry.chains.insert(
@@ -270,7 +278,7 @@ pub fn encrypt(
         .messageKeys
         .remove(&target_counter)
         .ok_or("message key not found")?;
-    let message_key = crate::util::unb64(&message_key_b64)?;
+    let message_key = Zeroizing::new(crate::util::unb64(&message_key_b64)?);
 
     // keys = deriveSecrets(messageKey, zeros(32), "WhisperMessageKeys") → 3 chunks.
     let keys = derive_secrets_n(&message_key, &[0u8; 32], b"WhisperMessageKeys", 3)?;
@@ -380,7 +388,7 @@ pub fn decrypt_whisper(
             .remove(&(msg.counter as i64))
             .ok_or("message key not found")?
     };
-    let message_key = crate::util::unb64(&message_key_b64)?;
+    let message_key = Zeroizing::new(crate::util::unb64(&message_key_b64)?);
 
     let keys = derive_secrets_n(&message_key, &[0u8; 32], b"WhisperMessageKeys", 3)?;
 
@@ -579,6 +587,19 @@ mod tests {
             !entry.chains.contains_key(&prev_recv_key),
             "retired receiving chain must be removed, not left with an empty key"
         );
+    }
+
+    #[test]
+    fn derived_keys_are_zeroized() {
+        // Compile-time assertion: the AES/MAC keys and IV must be Zeroizing, so
+        // they are scrubbed when the caller's scope ends. Zeroization is a
+        // drop-time property with no runtime observable, hence the trait bound
+        // on the production signature rather than a value assertion.
+        fn chunks_are_zeroizing(_v: &Vec<Zeroizing<Vec<u8>>>) {}
+        let secrets = derive_secrets_n(b"input", b"salt", b"info", 2).unwrap();
+        chunks_are_zeroizing(&secrets);
+        assert_eq!(secrets.len(), 2);
+        assert_eq!(secrets[0].len(), 32);
     }
 
     #[test]

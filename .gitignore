@@ -4,3 +4,6 @@ node_modules/
 /native/signal/target/
 /native/signal/signal.*.node
 /npm/*/*.node
+
+# build artifact of the loader guard (build:native writes here, build:loader patches index.cjs)
+native/signal/index.cjs.generated

@@ -12,13 +12,15 @@
     "napi.config.json"
   ],
   "scripts": {
-    "build:native": "napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs",
+    "build:native": "napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs.generated",
     "build:source": "cargo build --manifest-path native/signal/Cargo.toml --release --locked",
-    "build": "npm run build:native",
+    "build:loader": "node scripts/loader-guard.mjs patch native/signal/index.cjs.generated native/signal/index.cjs",
+    "build": "npm run build:native && npm run build:loader",
     "test": "node --test",
     "test:rust": "cargo test --manifest-path native/signal/Cargo.toml",
     "test:all": "npm run test:rust && npm test",
-    "prepublishOnly": "npm run build"
+    "verify:loader": "node scripts/loader-guard.mjs verify native/signal/index.cjs",
+    "prepublishOnly": "npm run build && npm run verify:loader"
   },
   "engines": {
     "node": ">=20.0.0"

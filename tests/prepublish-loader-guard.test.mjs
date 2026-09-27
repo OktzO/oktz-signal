@@ -209,3 +209,45 @@ test('the loader patch fails closed when the generator output changes', async ()
     rmSync(dir, { force: true, recursive: true });
   }
 });
+
+// A publish runs `prepublishOnly`. This drives that script for real, in a
+// sandbox, with only the Rust compile stubbed out: `build` is replaced by a
+// no-op so the chain under test is the one that can ship a reverted loader --
+// the guard step that follows it. If `verify:loader` is ever dropped from
+// `prepublishOnly`, both tests below change outcome.
+const publishSandbox = (loaderSource) => {
+  const dir = mkdtempSync(join(tmpdir(), 'oktz-signal-publish-'));
+  cpSync(join(root, 'scripts'), join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'native', 'signal'), { recursive: true });
+  writeFileSync(join(dir, 'native', 'signal', 'index.cjs'), loaderSource);
+
+  const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  manifest.scripts.build = 'node -e "process.exit(0)"';
+  writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2));
+
+  try {
+    return { status: 0, stdout: execFileSync('npm', ['run', '--silent', 'prepublishOnly'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
+  } catch (error) {
+    return { status: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+};
+
+test('prepublishOnly refuses to publish a regenerated loader', async () => {
+  const dir = await generateInto();
+  let regenerated;
+  try {
+    regenerated = readFileSync(join(dir, 'index.cjs'), 'utf8');
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+  const result = publishSandbox(regenerated);
+  assert.notEqual(result.status, 0, 'prepublishOnly accepted a regenerated loader');
+  assert.match(result.stderr + result.stdout, /hand-maintained/, `${result.stdout}${result.stderr}`);
+});
+
+test('prepublishOnly accepts the committed loader', () => {
+  const result = publishSandbox(committed);
+  assert.equal(result.status, 0, result.stderr);
+});

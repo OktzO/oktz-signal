@@ -168,7 +168,23 @@ function archiveAndMerge(oldRecord, freshRecord) {
   for (const entry of freshEntries) {
     old._sessions[entry.indexInfo.baseKey] = entry;
   }
+  evictOldestArchived(old);
   return new SessionRecord(JSON.stringify(old));
+}
+
+// libsignal bounds the archive (SessionRecord ARCHIVED_STATES_MAX_LENGTH) so a
+// peer that re-inits repeatedly cannot grow the record without bound — every
+// encrypt/decrypt parse+serializes the whole thing. Oldest archived entries go
+// first; the open session is never a candidate.
+const MAX_ARCHIVED_SESSIONS = 40;
+
+function evictOldestArchived(record) {
+  const archived = Object.entries(record._sessions)
+    .filter(([, e]) => e.indexInfo.closed !== -1)
+    .sort((a, b) => a[1].indexInfo.closed - b[1].indexInfo.closed);
+  for (let i = 0; i < archived.length - MAX_ARCHIVED_SESSIONS; i++) {
+    delete record._sessions[archived[i][0]];
+  }
 }
 
 // Native X25519 expects 32-byte keys. Wire public keys are 33-byte

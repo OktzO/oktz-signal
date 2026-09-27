@@ -156,19 +156,57 @@ fn fill_message_keys(chain: &mut Chain, counter: i64) -> Result<(), String> {
     fill_message_keys(chain, counter)
 }
 
+// Read-only twin of fill_message_keys: identical guards and identical key
+// schedule, but it writes nothing. Returns the message key the chain would have
+// produced, or `Ok(None)` when the counter is behind the chain and no such key
+// was retained. This is what lets decrypt read the message key for the MAC
+// without stepping the chain.
+fn peek_message_key(chain: &Chain, counter: i64) -> Result<Option<String>, String> {
+    if counter <= chain.chainKey.counter {
+        return Ok(chain.messageKeys.get(&counter).cloned());
+    }
+    if chain.chainKey.key.is_empty() {
+        return Err("receiving chain is closed".to_string());
+    }
+    if counter - chain.chainKey.counter > 2000 {
+        return Err("Over 2000 messages into the future!".to_string());
+    }
+    let mut ck = Zeroizing::new(crate::util::unb64(&chain.chainKey.key)?);
+    let mut message_key: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+    for _ in chain.chainKey.counter..counter {
+        let next = Zeroizing::new(hmac_sha256(&ck, &[0x01]));
+        ck = Zeroizing::new(hmac_sha256(&ck, &[0x02]));
+        message_key = next;
+    }
+    Ok(Some(crate::util::b64(&message_key[..])))
+}
+
+// A DH ratchet step that has been computed but not applied. Every field it
+// will write is derived here, from the entry as it stands, so the step can be
+// dropped on a MAC failure with the record never having been touched.
+struct RatchetPlan {
+    prev_recv_chain: Option<String>,
+    previous_counter: u32,
+    root_key: String,
+    ephemeral_key_pair: KeyPair,
+    receiving_chain: Chain,
+    sending_chain: Chain,
+}
+
 // DH ratchet step: only when no chain exists for the remote ephemeral key.
 // Mirrors libsignal maybeStepRatchet (session_cipher.js):
 //   1. Close previous receiving chain (if any): fill to previousCounter, drop key.
 //   2. receiving chain from current_ratchet_priv x remoteKey (rootKey update).
 //   3. Swap ephemeral keypair to a fresh key; previousCounter = old sending chain counter.
 //   4. sending chain from new_ratchet_priv x remoteKey (rootKey update).
-pub(crate) fn maybe_step_ratchet(
-    entry: &mut SessionEntry,
+// Every input is read; the four writes happen in apply_ratchet.
+fn plan_ratchet(
+    entry: &SessionEntry,
     remote_key_b64: &str,
     previous_counter: u32,
-) -> Result<(), String> {
+) -> Result<Option<RatchetPlan>, String> {
     if entry.chains.contains_key(remote_key_b64) {
-        return Ok(());
+        return Ok(None);
     }
     let remote_key = crate::util::unb64(remote_key_b64)?;
 
@@ -176,25 +214,48 @@ pub(crate) fn maybe_step_ratchet(
     // libsignal removes the chain outright (session_chains.remove); the keys it
     // derives to reach previousCounter are discarded with it — once a ratchet
     // step happens, messages still pending on the old chain are unrecoverable.
-    if !entry.currentRatchet.lastRemoteEphemeralKey.is_empty() {
-        let prev_b64 = entry.currentRatchet.lastRemoteEphemeralKey.clone();
-        if let Some(mut prev_chain) = entry.chains.remove(&prev_b64) {
+    let prev_recv_chain = if entry.currentRatchet.lastRemoteEphemeralKey.is_empty() {
+        None
+    } else {
+        let prev_b64 = &entry.currentRatchet.lastRemoteEphemeralKey;
+        if let Some(prev_chain) = entry.chains.get(prev_b64) {
             if prev_chain.chainType == 0 {
-                fill_message_keys(&mut prev_chain, previous_counter as i64)?;
+                peek_message_key(prev_chain, previous_counter as i64)?;
             }
         }
-    }
+        Some(prev_b64.clone())
+    };
 
     // 2. Receiving chain.
     let ratchet_priv = Zeroizing::new(crate::util::unb64(&entry.currentRatchet.ephemeralKeyPair.privKey)?);
     let shared = Zeroizing::new(curve::scalar_multiply(&ratchet_priv, &remote_key)?);
     let root_key = crate::util::unb64(&entry.currentRatchet.rootKey)?;
     let mk_recv = derive_secrets_n(&shared[..], &root_key, b"WhisperRatchet", 2)?;
-    entry.currentRatchet.rootKey = crate::util::b64(&mk_recv[0]);
 
-    entry.chains.insert(
-        remote_key_b64.to_string(),
-        Chain {
+    // 3. Fresh ephemeral keypair; snapshot the old sending chain's counter.
+    let mut plan_previous_counter = entry.currentRatchet.previousCounter;
+    if let Some(old_send) = entry.chains.get(&entry.currentRatchet.ephemeralKeyPair.pubKey) {
+        if old_send.chainType == 1 {
+            plan_previous_counter = old_send.chainKey.counter.max(0) as u32;
+        }
+    }
+    let mut seed = [0u8; 32];
+    OsRng.fill_bytes(&mut seed);
+    let (new_pub, new_priv) = curve::generate_keypair(&seed)?;
+
+    // 4. Sending chain: DH(new_priv, remoteKey) with the updated root key.
+    let shared_send = Zeroizing::new(curve::scalar_multiply(&new_priv, &remote_key)?);
+    let mk_send = derive_secrets_n(&shared_send[..], &mk_recv[0], b"WhisperRatchet", 2)?;
+
+    Ok(Some(RatchetPlan {
+        prev_recv_chain,
+        previous_counter: plan_previous_counter,
+        root_key: crate::util::b64(&mk_send[0]),
+        ephemeral_key_pair: KeyPair {
+            pubKey: crate::util::b64(&new_pub),
+            privKey: crate::util::b64(&new_priv),
+        },
+        receiving_chain: Chain {
             chainKey: ChainKey {
                 counter: -1,
                 key: crate::util::b64(&mk_recv[1]),
@@ -202,33 +263,7 @@ pub(crate) fn maybe_step_ratchet(
             chainType: 0, // RECEIVING
             messageKeys: BTreeMap::new(),
         },
-    );
-
-    // 3. Swap ephemeral keypair; delete old sending chain, snapshot its counter.
-    let old_eph_pub = entry.currentRatchet.ephemeralKeyPair.pubKey.clone();
-    if let Some(old_send) = entry.chains.remove(&old_eph_pub) {
-        if old_send.chainType == 1 {
-            entry.currentRatchet.previousCounter = old_send.chainKey.counter.max(0) as u32;
-        }
-    }
-    let mut seed = [0u8; 32];
-    OsRng.fill_bytes(&mut seed);
-    let (new_pub, new_priv) = curve::generate_keypair(&seed)?;
-    entry.currentRatchet.ephemeralKeyPair = KeyPair {
-        pubKey: crate::util::b64(&new_pub),
-        privKey: crate::util::b64(&new_priv),
-    };
-    entry.currentRatchet.lastRemoteEphemeralKey = remote_key_b64.to_string();
-
-    // 4. Sending chain: DH(new_priv, remoteKey) with the updated root key.
-    let shared_send = Zeroizing::new(curve::scalar_multiply(&new_priv, &remote_key)?);
-    let root_send = crate::util::unb64(&entry.currentRatchet.rootKey)?;
-    let mk_send = derive_secrets_n(&shared_send[..], &root_send, b"WhisperRatchet", 2)?;
-    entry.currentRatchet.rootKey = crate::util::b64(&mk_send[0]);
-
-    entry.chains.insert(
-        crate::util::b64(&new_pub),
-        Chain {
+        sending_chain: Chain {
             chainKey: ChainKey {
                 counter: -1,
                 key: crate::util::b64(&mk_send[1]),
@@ -236,8 +271,26 @@ pub(crate) fn maybe_step_ratchet(
             chainType: 1, // SENDING
             messageKeys: BTreeMap::new(),
         },
-    );
-    Ok(())
+    }))
+}
+
+fn apply_ratchet(entry: &mut SessionEntry, remote_key_b64: &str, plan: RatchetPlan) {
+    if let Some(prev_b64) = plan.prev_recv_chain {
+        entry.chains.remove(&prev_b64);
+    }
+    entry
+        .chains
+        .insert(remote_key_b64.to_string(), plan.receiving_chain);
+    if let Some(old_send) = entry.chains.remove(&entry.currentRatchet.ephemeralKeyPair.pubKey) {
+        if old_send.chainType == 1 {
+            entry.currentRatchet.previousCounter = plan.previous_counter;
+        }
+    }
+    let new_eph_id = plan.ephemeral_key_pair.pubKey.clone();
+    entry.currentRatchet.rootKey = plan.root_key;
+    entry.currentRatchet.ephemeralKeyPair = plan.ephemeral_key_pair;
+    entry.currentRatchet.lastRemoteEphemeralKey = remote_key_b64.to_string();
+    entry.chains.insert(new_eph_id, plan.sending_chain);
 }
 
 #[derive(serde::Serialize)]
@@ -382,7 +435,22 @@ pub fn decrypt_whisper(
     let mut record: SessionRecord = session::deserialize(session_json)?;
     let entry = session::current_session_mut(&mut record)
         .ok_or("no session entry")?;
+    let plaintext = decrypt_entry(entry, &msg, msg_buf, mac_bytes, our_identity_pub)?;
 
+    let session_json = session::serialize(&record)?;
+    Ok(DecryptResult {
+        session_json,
+        plaintext,
+    })
+}
+
+fn decrypt_entry(
+    entry: &mut SessionEntry,
+    msg: &proto::WhisperMessage,
+    msg_buf: &[u8],
+    mac_bytes: &[u8],
+    our_identity_pub: &[u8],
+) -> Result<Vec<u8>, String> {
     // Real WhatsApp ephemeral keys are 33 bytes (0x05 prefix) in WhisperMessage.
     // Strip to 32-byte X25519 — scalar_multiply + chain lookup expect 32 bytes.
     // (JS wrapper strips base_key the same way when building recipient session.)
@@ -393,26 +461,25 @@ pub fn decrypt_whisper(
     };
 
     let chain_id = crate::util::b64(eph_key);
-    maybe_step_ratchet(entry, &chain_id, msg.previous_counter)?;
+    // Plan the DH ratchet step without applying it. The sender is
+    // unauthenticated until verify_truncated_left below, so no part of the
+    // record may move before that point: a forged message must not install a
+    // new sending chain, rewrite the root key, or burn a message key.
+    let plan = plan_ratchet(entry, &chain_id, msg.previous_counter)?;
 
-    // Step the receiving chain IN PLACE (no full-chain clone; a chain can hold
-    // up to 2000 skipped message keys). On any error the whole record is
-    // discarded by the caller, so mid-flight mutation is safe to keep.
     if msg.counter > MAX_UNAUTHENTICATED_COUNTER {
         return Err("message counter out of range".to_string());
     }
-    let message_key_b64 = {
-        let chain = entry
+    let receiving_chain = match &plan {
+        Some(plan) => &plan.receiving_chain,
+        None => entry
             .chains
-            .get_mut(&chain_id)
+            .get(&chain_id)
             .filter(|c| c.chainType == 0)
-            .ok_or("no receiving chain")?;
-        fill_message_keys(chain, msg.counter as i64)?;
-        chain
-            .messageKeys
-            .remove(&(msg.counter as i64))
-            .ok_or("message key not found")?
+            .ok_or("no receiving chain")?,
     };
+    let message_key_b64 = peek_message_key(receiving_chain, msg.counter as i64)?
+        .ok_or("message key not found")?;
     let message_key = Zeroizing::new(crate::util::unb64(&message_key_b64)?);
 
     let keys = derive_secrets_n(&message_key, &[0u8; 32], b"WhisperMessageKeys", 3)?;
@@ -433,16 +500,30 @@ pub fn decrypt_whisper(
     mac.verify_truncated_left(mac_bytes)
         .map_err(|_| "MAC verification failed".to_string())?;
 
+    // Authenticated. Commit the plan and step the receiving chain in place —
+    // no clone, so a chain holding up to 2000 skipped message keys is not
+    // copied. peek_message_key applied the same guards (counter cap, open
+    // chain, retained key) to the same chain key, so this reaches the same
+    // state the read-only pass assumed.
+    if let Some(plan) = plan {
+        apply_ratchet(entry, &chain_id, plan);
+    }
+    let chain = entry
+        .chains
+        .get_mut(&chain_id)
+        .filter(|c| c.chainType == 0)
+        .ok_or("no receiving chain")?;
+    fill_message_keys(chain, msg.counter as i64)?;
+    chain
+        .messageKeys
+        .remove(&(msg.counter as i64))
+        .ok_or("message key not found")?;
+
     let iv: [u8; 16] = keys[2][..16].try_into().map_err(|_| "iv length")?;
     let plaintext = aes_cbc_decrypt(&keys[0], &iv, &msg.ciphertext)?;
 
     entry.pendingPreKey = None; // delete pendingPreKey
-
-    let session_json = session::serialize(&record)?;
-    Ok(DecryptResult {
-        session_json,
-        plaintext,
-    })
+    Ok(plaintext)
 }
 
 /// Decrypt a PreKeyWhisperMessage.
@@ -606,7 +687,14 @@ mod tests {
         );
 
         let (remote_pub, _) = curve::generate_keypair(&[0x9Au8; 32]).unwrap();
-        maybe_step_ratchet(entry, &crate::util::b64(&remote_pub), 0).unwrap();
+        let remote_b64 = crate::util::b64(&remote_pub);
+        let before = entry.clone();
+        let plan = plan_ratchet(entry, &remote_b64, 0).unwrap().unwrap();
+        assert_eq!(
+            before, *entry,
+            "planning a ratchet step must not touch the entry"
+        );
+        apply_ratchet(entry, &remote_b64, plan);
 
         assert!(
             !entry.chains.contains_key(&prev_recv_key),
@@ -800,6 +888,84 @@ mod tests {
                 err
             ),
         }
+    }
+
+    // Decode a wire message the way decrypt_whisper does, so a test can drive
+    // decrypt_entry with an arbitrary MAC.
+    fn split_wire(ciphertext: &[u8]) -> (proto::WhisperMessage, Vec<u8>, Vec<u8>) {
+        let msg_buf = ciphertext[1..ciphertext.len() - 8].to_vec();
+        let mac_bytes = ciphertext[ciphertext.len() - 8..].to_vec();
+        let msg = proto::decode_whisper(&msg_buf).unwrap();
+        (msg, msg_buf, mac_bytes)
+    }
+
+    #[test]
+    fn bad_mac_leaves_the_record_untouched() {
+        // The record mutation (ratchet step + message-key consumption) happens
+        // before the MAC is checked, so a forged message could advance the chain
+        // and burn a key that a later retry of the *same* message would need.
+        // The record must come back out of a failed decrypt bit for bit as it
+        // went in.
+        let (alice, bob, alice_id, bob_id) = build_pair();
+        let enc = encrypt(&alice, b"transactional", &alice_id, 42).unwrap();
+
+        let mut tampered = enc.ciphertext.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        let (msg, msg_buf, mac_bytes) = split_wire(&tampered);
+
+        let mut record: SessionRecord = session::deserialize(&bob).unwrap();
+        let before = session::serialize(&record).unwrap();
+        {
+            let entry = session::current_session_mut(&mut record).unwrap();
+            let err = match decrypt_entry(entry, &msg, &msg_buf, &mac_bytes, &bob_id) {
+                Ok(_) => panic!("a forged MAC must not decrypt"),
+                Err(e) => e,
+            };
+            assert!(err.contains("MAC"), "expected MAC failure, got: {}", err);
+        }
+        assert_eq!(
+            before,
+            session::serialize(&record).unwrap(),
+            "a MAC failure must not advance the receiving chain or consume a message key"
+        );
+    }
+
+    #[test]
+    fn bad_mac_does_not_step_the_ratchet() {
+        // Same invariant on the other branch: an unknown remote ephemeral key
+        // makes decrypt perform a DH ratchet step, which swaps the ephemeral
+        // keypair, rewrites the root key and installs a fresh sending chain. A
+        // forged message must not be able to do that.
+        let (_, bob, _, bob_id) = build_pair();
+
+        let (remote_pub, _) = curve::generate_keypair(&[0x9Au8; 32]).unwrap();
+        let mut eph = vec![0x05u8];
+        eph.extend_from_slice(&remote_pub);
+        let msg = proto::WhisperMessage {
+            ephemeral_key: eph,
+            counter: 0,
+            previous_counter: 0,
+            ciphertext: vec![0u8; 32],
+        };
+        let msg_buf = proto::encode_whisper(&msg).unwrap();
+        let mac_bytes = vec![0u8; 8]; // deliberately wrong MAC
+
+        let mut record: SessionRecord = session::deserialize(&bob).unwrap();
+        let before = session::serialize(&record).unwrap();
+        {
+            let entry = session::current_session_mut(&mut record).unwrap();
+            let err = match decrypt_entry(entry, &msg, &msg_buf, &mac_bytes, &bob_id) {
+                Ok(_) => panic!("a forged MAC must not decrypt"),
+                Err(e) => e,
+            };
+            assert!(err.contains("MAC"), "expected MAC failure, got: {}", err);
+        }
+        assert_eq!(
+            before,
+            session::serialize(&record).unwrap(),
+            "a MAC failure must not apply the DH ratchet step"
+        );
     }
 
     #[test]

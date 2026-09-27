@@ -186,9 +186,9 @@ pub(crate) fn build_initial_session_with_ephemeral(
         Chain {
             chainKey: ChainKey {
                 counter: -1,
-                key: crate::util::b64(&mk_ratchet[1]),
+                key: Some(crate::util::b64(&mk_ratchet[1])),
             },
-            chainType: 1, // SENDING
+            chainType: session::SENDING,
             messageKeys: BTreeMap::new(),
         },
     );
@@ -400,9 +400,9 @@ mod tests {
         assert_eq!(entry.currentRatchet.previousCounter, 0);
         assert_eq!(entry.chains.len(), 1);
         let chain = entry.chains.values().next().unwrap();
-        assert_eq!(chain.chainType, 1);
+        assert!(chain.is_sending());
         assert_eq!(chain.chainKey.counter, -1);
-        assert!(!chain.chainKey.key.is_empty());
+        assert!(!chain.chainKey.is_closed());
         assert!(chain.messageKeys.is_empty());
         assert!(entry.pendingPreKey.is_some());
     }
@@ -625,6 +625,6 @@ mod tests {
         let mk_ratchet = derive_secrets(&shared_ratchet, root_key, b"WhisperRatchet").unwrap();
 
         let chain = entry.chains.values().next().unwrap();
-        assert_eq!(chain.chainKey.key, crate::util::b64(&mk_ratchet[1]));
+        assert_eq!(chain.chainKey.key, Some(crate::util::b64(&mk_ratchet[1])));
     }
 }

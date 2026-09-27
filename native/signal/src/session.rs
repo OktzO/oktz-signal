@@ -109,6 +109,24 @@ pub struct Chain {
     pub messageKeys: BTreeMap<i64, String>,
 }
 
+// libsignal chain_type.js: SENDING: 1, RECEIVING: 2. oktz-signal wrote 0 for a
+// receiving chain before this was aligned, so 0 is still read as RECEIVING;
+// 2 is what gets written. Nothing keys off a receiving chain being 0, so the
+// alias cannot be confused with a sending chain.
+pub const SENDING: u32 = 1;
+pub const RECEIVING: u32 = 2;
+const LEGACY_RECEIVING: u32 = 0;
+
+impl Chain {
+    pub fn is_sending(&self) -> bool {
+        self.chainType == SENDING
+    }
+
+    pub fn is_receiving(&self) -> bool {
+        self.chainType == RECEIVING || self.chainType == LEGACY_RECEIVING
+    }
+}
+
 impl Zeroize for Chain {
     fn zeroize(&mut self) {
         self.chainKey.zeroize();
@@ -131,7 +149,30 @@ impl Drop for Chain {
 pub struct ChainKey {
     #[zeroize(skip)]
     pub counter: i64,
-    pub key: String,
+    // libsignal retires a chain by deleting its key
+    // (`delete previousRatchet.chainKey.key`, session_cipher.js) and serialises
+    // `key: c.chainKey.key && ...` — undefined for a deleted key, which
+    // JSON.stringify then omits. A record libsignal wrote therefore carries
+    // `{"chainKey":{"counter":n}}`, so the field has to be optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl ChainKey {
+    /// A chain with no key material: deleted by a ratchet step, or blank. Both
+    /// are the same condition and both must fail closed — deriving a message
+    /// key from an empty chain key means HMAC under a public key, which would
+    /// let a forgery satisfy the real MAC.
+    pub fn is_closed(&self) -> bool {
+        self.key.as_deref().map_or(true, str::is_empty)
+    }
+
+    pub fn key(&self) -> Result<&str, String> {
+        if self.is_closed() {
+            return Err("chain key is closed".to_string());
+        }
+        Ok(self.key.as_deref().unwrap_or_default())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

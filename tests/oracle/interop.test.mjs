@@ -47,154 +47,166 @@ describe('curve oracle: oktz-signal vs libsignal', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// Helper: build Bob (receiver) session mirror from Alice (sender) session
+// Test 2: a record libsignal produced, decrypted by oktz-signal
+//
+// The earlier version of this test hand-built the receiver's record in
+// oktz's own shape — including its own `chainType: 0` and 32-byte chain
+// keys — so it could only ever prove oktz agrees with itself. Here libsignal
+// owns BOTH endpoints and writes the receiver's record itself; oktz-signal is
+// dropped in as that receiver's SessionCipher. Every field the decrypt path
+// reads is a field libsignal chose.
 // ─────────────────────────────────────────────────────────────────────
-function buildBobSessionJson(aliceSessionJson, bobIdentityPub33, senderIdentityPub33) {
-  const alice = JSON.parse(aliceSessionJson);
-  const aEntry = Object.values(alice._sessions)[0];
-  const aEphPub = aEntry.currentRatchet.ephemeralKeyPair.pubKey;
-  const aEphPriv = aEntry.currentRatchet.ephemeralKeyPair.privKey;
-  const aSendChain = Object.values(aEntry._chains).find(c => c.chainType === 1);
-  const rootKey = aEntry.currentRatchet.rootKey;
 
-  // Bob's own ephemeral keypair for the ratchet
-  const bobEphSeed = randomBytes(32);
-  const [bobPub, bobPriv] = native.curveGenerateKeypair(bobEphSeed);
+const chainEntries = (json) =>
+  Object.entries(Object.values(JSON.parse(json)._sessions)[0]._chains);
 
-  const senderIdentityB64 = Buffer.from(senderIdentityPub33).toString('base64');
-
-  // Strip 0x05 prefix from Alice's ephemeral key (33B → 32B) to match
-  // production behavior (x3dhBuildRecipientSession strips base_key before
-  // keying receiving chain). Real WhatsApp messages carry 33-byte ephemeral
-  // keys, but receiving chains are keyed by the 32-byte X25519 key.
-  const aEphRaw = Buffer.from(aEphPub, 'base64');
-  const aEph32 = aEphRaw[0] === 0x05 && aEphRaw.length === 33
-    ? aEphRaw.subarray(1)
-    : aEphRaw;
-  const aEphPub32 = aEph32.toString('base64');
-
-  const bobSession = {
-    _sessions: {
-      [Buffer.from(bobPub).toString('base64')]: {
-        registrationId: 42,
-        currentRatchet: {
-          ephemeralKeyPair: {
-            pubKey: Buffer.from(bobPub).toString('base64'),
-            privKey: Buffer.from(bobPriv).toString('base64')
-          },
-          lastRemoteEphemeralKey: aEphPub32,
-          previousCounter: 0,
-          rootKey: rootKey
-        },
-        indexInfo: {
-          baseKey: "bob-base",
-          baseKeyType: 0,
-          closed: -1,
-          used: Date.now(),
-          created: Date.now(),
-          remoteIdentityKey: senderIdentityB64
-        },
-        _chains: {
-          [aEphPub32]: {
-            chainKey: {
-              counter: -1,
-              key: aSendChain.chainKey.key
-            },
-            chainType: 0,
-            messageKeys: {}
-          }
-        }
-      }
-    },
-    version: "v1"
-  };
-  if (aEntry.pendingPreKey) {
-    bobSession._sessions[Object.keys(bobSession._sessions)[0]].pendingPreKey = {
-      baseKey: aEntry.pendingPreKey.baseKey
-    };
+// Guards that the record under test really is libsignal's and not something
+// oktz-shaped: libsignal keys _chains by the 33-byte wire public key
+// (session_record.js addChain/getChain) and marks a receiving chain
+// chainType RECEIVING === 2 (chain_type.js).
+function assertLibsignalReceiverRecord(json) {
+  const chains = chainEntries(json);
+  assert.ok(chains.length > 0, 'the receiver record must have chains');
+  for (const [key, chain] of chains) {
+    assert.strictEqual(Buffer.from(key, 'base64').length, 33,
+      `chain key must be libsignal's 33-byte wire key, got ${Buffer.from(key, 'base64').length}`);
+    assert.ok(chain.chainType === 1 || chain.chainType === 2,
+      `chainType must be a libsignal ChainType, got ${chain.chainType}`);
   }
-  return JSON.stringify(bobSession);
+  assert.ok(chains.some(([, c]) => c.chainType === 2),
+    'the receiver record must contain a libsignal RECEIVING (2) chain');
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Test 2: libsignal encrypt → oktz-signal decrypt
-// ─────────────────────────────────────────────────────────────────────
+// libsignal storages, one per endpoint. `record` is swapped freely so a
+// record oktz wrote can be handed straight back to libsignal.
+function libStorage(identityPriv, identityPub, spk, regId) {
+  const st = { session: null };
+  st.storage = {
+    loadSession: async () => st.session,
+    storeSession: async (_id, s) => { st.session = s; },
+    isTrustedIdentity: () => true,
+    loadPreKey: async () => null,
+    removePreKey: async () => {},
+    loadSignedPreKey: async () => spk,
+    loadIdentityKey: async () => identityPub,
+    saveIdentity: async () => false,
+    loadSenderKey: async () => null,
+    storeSenderKey: async () => {},
+    getOurRegistrationId: () => regId,
+    getOurIdentity: () => ({ privKey: identityPriv, pubKey: identityPub }),
+  };
+  return st;
+}
+
+// Two real libsignal identities plus Bob's signed prekey.
+function libIdentities() {
+  const alicePriv = randomBytes(32), bobPriv = randomBytes(32);
+  const alicePub = libsignal.curve.getPublicFromPrivateKey(alicePriv);
+  const bobPub = libsignal.curve.getPublicFromPrivateKey(bobPriv);
+  const spk = libsignal.curve.generateKeyPair(randomBytes(32));
+  const spkSig = Buffer.from(native.curveSign(bobPriv, spk.pubKey, null));
+  return { alicePriv, bobPriv, alicePub, bobPub, spk, spkSig };
+}
+
 describe('protocol oracle: libsignal → oktz-signal interop', () => {
-  it('libsignal encrypt → oktz-signal decrypt', async () => {
-    // 1. Deterministic identity keys
-    const alicePriv = Buffer.alloc(32, 0xAA);
-    const bobPriv = Buffer.alloc(32, 0xBB);
-    const alicePub33 = libsignal.curve.getPublicFromPrivateKey(alicePriv);
-    const bobPub33 = libsignal.curve.getPublicFromPrivateKey(bobPriv);
+  it('decrypts a libsignal message with the receiver record libsignal itself stored', async () => {
+    const k = libIdentities();
+    const alice = libStorage(k.alicePriv, k.alicePub, k.spk, 111);
+    const bob = libStorage(k.bobPriv, k.bobPub, k.spk, 222);
+    const toBob = new libsignal.ProtocolAddress('bob', 1);
+    const toAlice = new libsignal.ProtocolAddress('alice', 1);
 
-    // 2. Bob's signed prekey (32-byte X25519 key)
-    const spkPriv = Buffer.alloc(32, 0xCC);
-    const spkPub = native.curveGenerateKeypair(spkPriv)[0]; // 32 bytes
-    const spkSig = native.curveSign(bobPriv, Buffer.concat([Buffer.from([5]), spkPub]), null); // 64 bytes
+    await new libsignal.SessionBuilder(alice.storage, toBob).initOutgoing({
+      identityKey: k.bobPub,
+      signedPreKey: { keyId: 1, publicKey: k.spk.pubKey, signature: k.spkSig },
+      preKey: null,
+      registrationId: 42,
+    });
 
-    // 3. Bob's one-time prekey
-    const opkPriv = Buffer.alloc(32, 0xDD);
-    const opkPub = native.curveGenerateKeypair(opkPriv)[0]; // 32 bytes
+    const aliceCipher = new libsignal.SessionCipher(alice.storage, toBob);
+    const bobCipher = new libsignal.SessionCipher(bob.storage, toAlice);
 
-    // 4. Storage for libsignal session
-    let storedSession = null;
-    const storage = {
-      loadSession: async () => storedSession,
-      storeSession: async (id, s) => { storedSession = s; },
-      isTrustedIdentity: () => true,
-      loadPreKey: async () => null,
-      removePreKey: async () => {},
-      loadSignedPreKey: async () => ({ privKey: spkPriv, pubKey: Buffer.concat([Buffer.from([5]), spkPub]) }),
-      getOurRegistrationId: () => 12345,
-      getOurIdentity: () => ({ privKey: alicePriv, pubKey: alicePub33 }),
-      getOurIdentityKey: () => alicePub33,
-    };
+    // libsignal's own Bob consumes the first (prekey) message, so the record
+    // oktz-signal is about to read is one libsignal wrote and libsignal read.
+    const first = await aliceCipher.encrypt(Buffer.from('first, consumed by libsignal'));
+    assert.strictEqual(first.type, 3, 'first message must be a PreKeyWhisperMessage');
+    assert.deepStrictEqual(await bobCipher.decryptPreKeyWhisperMessage(first.body),
+      Buffer.from('first, consumed by libsignal'));
 
-    const address = new libsignal.ProtocolAddress('bob-device', 1);
-    const builder = new libsignal.SessionBuilder(storage, address);
+    const bobRecord = JSON.stringify(bob.session.serialize());
+    assertLibsignalReceiverRecord(bobRecord);
 
-    const device = {
-      identityKey: bobPub33,
-      signedPreKey: {
-        keyId: 1,
-        publicKey: Buffer.concat([Buffer.from([5]), spkPub]),
-        signature: spkSig
-      },
-      preKey: {
-        keyId: 2,
-        publicKey: Buffer.concat([Buffer.from([5]), opkPub])
-      },
-      registrationId: 42
-    };
+    // The next message is encrypted by libsignal and decrypted by oktz-signal
+    // from that record — no part of the record is synthesised here.
+    const plaintext = Buffer.from('hello from libsignal, decrypted by oktz-signal');
+    const { type, body } = await aliceCipher.encrypt(plaintext);
+    // libsignal's sender keeps pendingPreKey until it receives a reply
+    // (session_cipher.js deletes it only in doDecryptWhisperMessage), so every
+    // message on this leg is a PreKeyWhisperMessage.
+    assert.strictEqual(type, 3, 'sender still wraps as PreKeyWhisperMessage');
+    assert.strictEqual(body[0], 0x33, 'version byte must be 0x33');
 
-    await builder.initOutgoing(device);
-    assert.ok(storedSession, 'session should be stored');
-
-    // 5. Serialize libsignal session BEFORE encrypt (chain not yet advanced)
-    const aliceSessionObj = storedSession.serialize();
-    const aliceSessionStr = typeof aliceSessionObj === 'string' ? aliceSessionObj : JSON.stringify(aliceSessionObj);
-
-    // 6. Build Bob's mirror session from pre-encrypt Alice session
-    const bobSessionJson = buildBobSessionJson(aliceSessionStr, bobPub33, alicePub33);
-
-    // 7. Encrypt with libsignal SessionCipher
-    const cipher = new libsignal.SessionCipher(storage, address);
-    const plaintext = Buffer.from('hello signal protocol 2026');
-    const { type, body } = await cipher.encrypt(plaintext);
-
-    // First message should be type 3 (PreKeyWhisperMessage)
-    assert.strictEqual(type, 3, 'first message must be prekey bundle');
-
-    const fullCiphertext = Buffer.from(body, 'binary');
-    assert.strictEqual(fullCiphertext[0], 0x33, 'version byte must be 0x33');
-
-    // 8. Decrypt with oktz-signal native
-    const result = native.ratchetDecryptPkmsg(
-      bobSessionJson, fullCiphertext, bobPub33
-    );
-
+    const result = native.ratchetDecryptPkmsg(bobRecord, Buffer.from(body), k.bobPub);
     assert.deepStrictEqual(Buffer.from(result.plaintext), plaintext,
       'oktz-signal decrypt mismatch');
+  });
+
+  it('completes a bidirectional conversation across DH ratchet steps', async () => {
+    const k = libIdentities();
+    const alice = libStorage(k.alicePriv, k.alicePub, k.spk, 111);
+    const bob = libStorage(k.bobPriv, k.bobPub, k.spk, 222);
+    const toBob = new libsignal.ProtocolAddress('bob', 1);
+    const toAlice = new libsignal.ProtocolAddress('alice', 1);
+
+    await new libsignal.SessionBuilder(alice.storage, toBob).initOutgoing({
+      identityKey: k.bobPub,
+      signedPreKey: { keyId: 1, publicKey: k.spk.pubKey, signature: k.spkSig },
+      preKey: null,
+      registrationId: 42,
+    });
+
+    const aliceCipher = new libsignal.SessionCipher(alice.storage, toBob);
+    const bobCipher = new libsignal.SessionCipher(bob.storage, toAlice);
+
+    // Decrypt one prekey message with libsignal so the receiver record exists.
+    const first = await aliceCipher.encrypt(Buffer.from('bootstrap'));
+    await bobCipher.decryptPreKeyWhisperMessage(first.body);
+
+    // oktz-signal takes over Bob's SessionCipher. Every turn: libsignal
+    // encrypts with its own record, oktz-signal decrypts and hands the updated
+    // record back to libsignal's storage, which encrypts the reply. Each
+    // direction change is a DH ratchet step in both engines.
+    let oktzBob = JSON.stringify(bob.session.serialize());
+    const oktzDecrypt = (type, body) => {
+      const wire = Buffer.from(body);
+      const result = type === 3
+        ? native.ratchetDecryptPkmsg(oktzBob, wire, k.bobPub)
+        : native.ratchetDecryptWhisper(oktzBob, wire, k.bobPub);
+      oktzBob = result.sessionJson;
+      return Buffer.from(result.plaintext);
+    };
+
+    for (let turn = 0; turn < 4; turn++) {
+      const say = Buffer.from(`alice->bob turn ${turn}`);
+      const out = await aliceCipher.encrypt(say);
+      assert.deepStrictEqual(oktzDecrypt(out.type, out.body), say,
+        `oktz-signal must decrypt libsignal turn ${turn}`);
+
+      // oktz-signal's record goes back into libsignal's storage; libsignal
+      // replies from it, so the reply is encrypted on a chain oktz ratcheted.
+      bob.session = libsignal.SessionRecord.deserialize(JSON.parse(oktzBob));
+      const reply = Buffer.from(`bob->alice turn ${turn}`);
+      const back = await bobCipher.encrypt(reply);
+      assert.deepStrictEqual(
+        Buffer.from(await aliceCipher.decryptWhisperMessage(back.body)), reply,
+        `libsignal must decrypt the reply oktz-signal's ratchet produced (turn ${turn})`);
+    }
+
+    // Close the loop: the reply libsignal just produced is decrypted by
+    // oktz-signal from the record it wrote, not from libsignal's.
+    const last = Buffer.from('closing message');
+    const out = await aliceCipher.encrypt(last);
+    assert.deepStrictEqual(oktzDecrypt(out.type, out.body), last);
   });
 });
 

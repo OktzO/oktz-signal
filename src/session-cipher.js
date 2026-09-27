@@ -103,36 +103,36 @@ export class SessionCipher {
       const baseKey = strip05(baseKeyRaw).toString('base64');
 
       let session = await this.storage.loadSession(addrKey);
+      let candidate = session;
+      let built = false;
       if (!session || !sessionHasBaseKey(session, baseKey)) {
-        const builder = new SessionBuilder(this.storage, this.addr);
-        const fresh = await builder.initIncoming(null, pkmsg);
-        if (session) {
-          // libsignal behavior (session_builder.js initIncoming): ARCHIVE the
-          // old open session instead of replacing it — out-of-order backlog
-          // from the previous session stays decryptable, then the new entry is
-          // merged into the same record.
-          const merged = archiveAndMerge(session, fresh);
-          await this.storage.storeSession(addrKey, merged);
-          session = merged;
-        } else {
-          await this.storage.storeSession(addrKey, fresh);
-          session = fresh;
-        }
-        // One-time prekey is consumed (libsignal removes it after successful
-        // initIncoming to prevent pkmsg replay from reusing the OPK).
-        if (pkmsg.preKeyId != null && this.storage.removePreKey) {
-          try { await this.storage.removePreKey(pkmsg.preKeyId) } catch { /* best-effort */ }
-        }
+        // The pkmsg is authenticated ONLY by the MAC that ratchetDecryptPkmsg
+        // verifies below, so the candidate record is built in memory and never
+        // persisted first: storing it (or burning the OPK) up front would let
+        // one unauthenticated remote message destroy this session.
+        const fresh = await new SessionBuilder(this.storage, this.addr)
+          .initIncoming(null, pkmsg);
+        // libsignal behavior (session_builder.js initIncoming): ARCHIVE the old
+        // open session instead of replacing it — out-of-order backlog from the
+        // previous session stays decryptable, then the new entry is merged into
+        // the same record.
+        candidate = session ? archiveAndMerge(session, fresh) : fresh;
+        built = true;
       }
 
       // Decrypt embedded WhisperMessage (handles ratchet step)
       let result;
       try {
         result = native.ratchetDecryptPkmsg(
-          session.serialize(), Buffer.from(ciphertext), ourIdentityPub
+          candidate.serialize(), Buffer.from(ciphertext), ourIdentityPub
         );
       } catch (e) { mapNativeError(e); }
       await this.storage.storeSession(addrKey, new SessionRecord(result.sessionJson));
+      // One-time prekey is consumed (libsignal removes it after successful
+      // initIncoming to prevent pkmsg replay from reusing the OPK).
+      if (built && pkmsg.preKeyId != null && this.storage.removePreKey) {
+        try { await this.storage.removePreKey(pkmsg.preKeyId) } catch { /* best-effort */ }
+      }
       return result.plaintext;
     });
   }

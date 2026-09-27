@@ -1,8 +1,7 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const native = require('../native/signal/index.cjs');
-import { QueueJob } from './queue-job.js';
-import { SessionRecord } from './session-record.js';
+import { SessionRecord, sharedQueue } from './session-record.js';
 import { NoSessionError } from './errors.js';
 import { SessionBuilder } from './session-builder.js';
 
@@ -30,16 +29,7 @@ function mapNativeError(e) {
   throw e;
 }
 
-// Queues are shared per (storage, addr) so two SessionCipher instances over
-// the same record can't interleave load/store and duplicate ratchet counters.
-const QUEUE_INDEX = new WeakMap(); // storage -> Map<addrKey, QueueJob>
-function sharedQueue(storage, addrKey) {
-  let byAddr = QUEUE_INDEX.get(storage);
-  if (!byAddr) QUEUE_INDEX.set(storage, (byAddr = new Map()));
-  let q = byAddr.get(addrKey);
-  if (!q) byAddr.set(addrKey, (q = new QueueJob()));
-  return q;
-}
+// Queues are shared per (storage, addr); see sharedQueue in session-record.js.
 
 export class SessionCipher {
   constructor(storage, addr) {
@@ -103,36 +93,38 @@ export class SessionCipher {
       const baseKey = strip05(baseKeyRaw).toString('base64');
 
       let session = await this.storage.loadSession(addrKey);
+      let candidate = session;
+      let built = false;
       if (!session || !sessionHasBaseKey(session, baseKey)) {
-        const builder = new SessionBuilder(this.storage, this.addr);
-        const fresh = await builder.initIncoming(null, pkmsg);
-        if (session) {
-          // libsignal behavior (session_builder.js initIncoming): ARCHIVE the
-          // old open session instead of replacing it — out-of-order backlog
-          // from the previous session stays decryptable, then the new entry is
-          // merged into the same record.
-          const merged = archiveAndMerge(session, fresh);
-          await this.storage.storeSession(addrKey, merged);
-          session = merged;
-        } else {
-          await this.storage.storeSession(addrKey, fresh);
-          session = fresh;
-        }
-        // One-time prekey is consumed (libsignal removes it after successful
-        // initIncoming to prevent pkmsg replay from reusing the OPK).
-        if (pkmsg.preKeyId != null && this.storage.removePreKey) {
-          try { await this.storage.removePreKey(pkmsg.preKeyId) } catch { /* best-effort */ }
-        }
+        // The pkmsg is authenticated ONLY by the MAC that ratchetDecryptPkmsg
+        // verifies below, so the candidate record is built in memory and never
+        // persisted first: storing it (or burning the OPK) up front would let
+        // one unauthenticated remote message destroy this session.
+        const fresh = await new SessionBuilder(this.storage, this.addr)
+          .initIncoming(null, pkmsg);
+        // libsignal behavior (session_builder.js initIncoming): ARCHIVE the old
+        // open session instead of replacing it — out-of-order backlog from the
+        // previous session stays decryptable, then the new entry is merged into
+        // the same record.
+        candidate = session ? archiveAndMerge(session, fresh) : fresh;
+        built = true;
       }
 
       // Decrypt embedded WhisperMessage (handles ratchet step)
       let result;
       try {
         result = native.ratchetDecryptPkmsg(
-          session.serialize(), Buffer.from(ciphertext), ourIdentityPub
+          candidate.serialize(), Buffer.from(ciphertext), ourIdentityPub
         );
       } catch (e) { mapNativeError(e); }
       await this.storage.storeSession(addrKey, new SessionRecord(result.sessionJson));
+      // One-time prekey is consumed (libsignal removes it after successful
+      // initIncoming to prevent pkmsg replay from reusing the OPK). A failure
+      // here is NOT best-effort: the caller must learn the prekey is still on
+      // disk and replayable rather than assume it was consumed.
+      if (built && pkmsg.preKeyId != null && this.storage.removePreKey) {
+        await this.storage.removePreKey(pkmsg.preKeyId);
+      }
       return result.plaintext;
     });
   }
@@ -140,16 +132,14 @@ export class SessionCipher {
 
 // Does the stored SessionRecord already hold an entry whose baseKey matches
 // `baseKeyB64`? Mirrors libsignal SessionRecord.getSession(baseKey) lookup.
+// An unparseable record must throw: answering "no" would answer corruption with
+// a fresh X3DH build and a burned one-time prekey.
 function sessionHasBaseKey(session, baseKeyB64) {
-  try {
-    const record = JSON.parse(session.serialize());
-    const entries = record._sessions || {};
-    return Object.values(entries).some(
-      (e) => e.indexInfo && e.indexInfo.baseKey === baseKeyB64
-    );
-  } catch {
-    return false;
-  }
+  const record = JSON.parse(session.serialize());
+  const entries = record._sessions || {};
+  return Object.values(entries).some(
+    (e) => e.indexInfo && e.indexInfo.baseKey === baseKeyB64
+  );
 }
 
 // Archive the existing open session(s) and merge the freshly-built entry into
@@ -168,7 +158,23 @@ function archiveAndMerge(oldRecord, freshRecord) {
   for (const entry of freshEntries) {
     old._sessions[entry.indexInfo.baseKey] = entry;
   }
+  evictOldestArchived(old);
   return new SessionRecord(JSON.stringify(old));
+}
+
+// libsignal bounds the archive (SessionRecord ARCHIVED_STATES_MAX_LENGTH) so a
+// peer that re-inits repeatedly cannot grow the record without bound — every
+// encrypt/decrypt parse+serializes the whole thing. Oldest archived entries go
+// first; the open session is never a candidate.
+const MAX_ARCHIVED_SESSIONS = 40;
+
+function evictOldestArchived(record) {
+  const archived = Object.entries(record._sessions)
+    .filter(([, e]) => e.indexInfo.closed !== -1)
+    .sort((a, b) => a[1].indexInfo.closed - b[1].indexInfo.closed);
+  for (let i = 0; i < archived.length - MAX_ARCHIVED_SESSIONS; i++) {
+    delete record._sessions[archived[i][0]];
+  }
 }
 
 // Native X25519 expects 32-byte keys. Wire public keys are 33-byte

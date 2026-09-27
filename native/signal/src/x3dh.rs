@@ -12,6 +12,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -29,13 +30,14 @@ pub struct X3dhParams<'a> {
 }
 
 /// deriveSecrets pattern (RFC 5869, 3 chunks) — same as libsignal crypto.js.
-fn derive_secrets(input: &[u8], salt: &[u8], info: &[u8]) -> Result<[Vec<u8>; 3], String> {
+/// Chunks are Zeroizing: they carry the root key and the first chain key.
+fn derive_secrets(input: &[u8], salt: &[u8], info: &[u8]) -> Result<[Zeroizing<Vec<u8>>; 3], String> {
     let prk = {
         let mut mac = HmacSha256::new_from_slice(salt).map_err(|e| e.to_string())?;
         mac.update(input);
         mac.finalize().into_bytes()
     };
-    let mut out = [Vec::new(), Vec::new(), Vec::new()];
+    let mut out: [Zeroizing<Vec<u8>>; 3] = Default::default();
     let mut prev = Vec::new();
     for (i, slot) in out.iter_mut().enumerate() {
         let mut mac = HmacSha256::new_from_slice(prk.as_ref()).map_err(|e| e.to_string())?;
@@ -43,10 +45,20 @@ fn derive_secrets(input: &[u8], salt: &[u8], info: &[u8]) -> Result<[Vec<u8>; 3]
         mac.update(info);
         mac.update(&[(i + 1) as u8]);
         let chunk = mac.finalize().into_bytes().to_vec();
-        *slot = chunk.clone();
+        *slot = Zeroizing::new(chunk.clone());
         prev = chunk;
     }
     Ok(out)
+}
+
+/// Strip the 0x05 wire prefix from a 33-byte XEdDSA public key. 32-byte X25519
+/// keys pass through unchanged.
+fn strip_prefix(key: &[u8]) -> &[u8] {
+    if key.len() == 33 && key[0] == 0x05 {
+        &key[1..]
+    } else {
+        key
+    }
 }
 
 fn now_ms() -> i64 {
@@ -88,6 +100,18 @@ pub(crate) fn build_initial_session_with_ephemeral(
         return Err("signed prekey signature verification failed".to_string());
     }
 
+    // 1b. The caller's own identity pair and the recipient prekey must be the
+    // keys they claim to be. Both were previously accepted unchecked, so a
+    // caller could pair a private key with someone else's public identity, or
+    // name a signed prekey other than the one the recipient signed.
+    let identity_pub_32 = strip_prefix(params.identity_pub);
+    if &curve::generate_keypair(params.identity_priv)?.0[..] != identity_pub_32 {
+        return Err("identity_pub does not match identity_priv".to_string());
+    }
+    if strip_prefix(params.recipient_prekey) != spk {
+        return Err("recipient_prekey does not match the signed prekey".to_string());
+    }
+
     // 2. Ephemeral base key — public = base(priv). generate_keypair returns (pub, seed).
     let (ephemeral_pub, _) = curve::generate_keypair(ephemeral_priv)?;
 
@@ -99,7 +123,7 @@ pub(crate) fn build_initial_session_with_ephemeral(
     // 4. Shared secret: 0xff*32 || a1 || a2 || a3 [|| a4].
     let has_opk = params.prekey_pub.is_some();
     let len = if has_opk { 160 } else { 128 };
-    let mut shared = vec![0u8; len];
+    let mut shared = Zeroizing::new(vec![0u8; len]);
     for i in 0..32 {
         shared[i] = 0xff;
     }
@@ -162,9 +186,9 @@ pub(crate) fn build_initial_session_with_ephemeral(
         Chain {
             chainKey: ChainKey {
                 counter: -1,
-                key: crate::util::b64(&mk_ratchet[1]),
+                key: Some(crate::util::b64(&mk_ratchet[1])),
             },
-            chainType: 1, // SENDING
+            chainType: session::SENDING,
             messageKeys: BTreeMap::new(),
         },
     );
@@ -202,6 +226,13 @@ pub fn build_recipient_session(
         .get(1..33)
         .ok_or("sender_identity must be 33 bytes")?;
 
+    // The ratchet keypair stored below is used to derive receiving chains, so a
+    // public key that our private key does not produce would build a session
+    // that can never decrypt anything while looking well-formed.
+    if &curve::generate_keypair(our_signed_prekey_priv)?.0[..] != strip_prefix(our_signed_prekey_pub) {
+        return Err("our_signed_prekey_pub does not match our_signed_prekey_priv".to_string());
+    }
+
     // DH agreements (matched to libsignal initSession non-initiator order).
     // a1 = DH(theirSignedPubKey, ourIdentityKey.privKey) = DH(EK_A, IK_B_priv)
     let a1 = curve::scalar_multiply(our_identity_priv, sender_ephemeral)?;
@@ -212,7 +243,7 @@ pub fn build_recipient_session(
 
     let has_opk = our_prekey_priv.is_some();
     let len = if has_opk { 160 } else { 128 };
-    let mut shared = vec![0u8; len];
+    let mut shared = Zeroizing::new(vec![0u8; len]);
     for i in 0..32 {
         shared[i] = 0xff;
     }
@@ -285,6 +316,70 @@ mod tests {
     }
 
     #[test]
+    fn test_identity_pub_must_match_identity_priv() {
+        let sk = [0x42u8; 32];
+        let spk = [0x43u8; 32];
+        let sig = curve::sign(&sk, &spk, None).unwrap();
+        let mut params = test_params(42, 0x42, 0x43, &sig);
+        // A public key that the private key does not produce. The signature
+        // check is unaffected because it authenticates recipient_pub, so this
+        // used to sail through with an identity key pair that cannot exist.
+        let (other_pk, _) = curve::generate_keypair(&[0x77u8; 32]).unwrap();
+        let mut wrong = vec![0x05u8];
+        wrong.extend_from_slice(&other_pk);
+        params.identity_pub = Box::leak(Box::new(wrong));
+        let result = build_initial_session(&params);
+        assert!(
+            result.is_err(),
+            "identity_pub must be rejected when it does not match identity_priv"
+        );
+        assert!(result.unwrap_err().contains("identity_pub"));
+    }
+
+    #[test]
+    fn test_recipient_prekey_must_match_signed_prekey() {
+        let sk = [0x42u8; 32];
+        let spk = [0x43u8; 32];
+        let sig = curve::sign(&sk, &spk, None).unwrap();
+        let mut params = test_params(42, 0x42, 0x43, &sig);
+        // The recipient's signed prekey is one key. Passing a second, different
+        // value here built a session whose chain keys came from a key that was
+        // never signed.
+        params.recipient_prekey = Box::leak(Box::new([0x66u8; 32]));
+        let result = build_initial_session(&params);
+        assert!(
+            result.is_err(),
+            "recipient_prekey must be rejected when it differs from the signed prekey"
+        );
+        assert!(result.unwrap_err().contains("recipient_prekey"));
+    }
+
+    #[test]
+    fn test_recipient_session_rejects_mismatched_signed_prekey() {
+        let bob_sk = [0x77u8; 32];
+        let (bob_pk32, bob_sk2) = curve::generate_keypair(&bob_sk).unwrap();
+        let mut bob_id = vec![0x05u8];
+        bob_id.extend_from_slice(&bob_pk32);
+
+        let spk_priv = [0x43u8; 32];
+        let (spk_pub, _) = curve::generate_keypair(&spk_priv).unwrap();
+        let result = build_recipient_session(
+            &bob_sk2,
+            &spk_priv,
+            &[0x99u8; 32], // not base(spk_priv)
+            None,
+            &bob_id,
+            &spk_pub,
+            42,
+        );
+        assert!(
+            result.is_err(),
+            "our_signed_prekey_pub must be rejected when it does not match our_signed_prekey_priv"
+        );
+        assert!(result.unwrap_err().contains("signed_prekey_pub"));
+    }
+
+    #[test]
     fn test_build_initial_session_structure() {
         let sk = [0x42u8; 32];
         let spk = [0x43u8; 32];
@@ -305,9 +400,9 @@ mod tests {
         assert_eq!(entry.currentRatchet.previousCounter, 0);
         assert_eq!(entry.chains.len(), 1);
         let chain = entry.chains.values().next().unwrap();
-        assert_eq!(chain.chainType, 1);
+        assert!(chain.is_sending());
         assert_eq!(chain.chainKey.counter, -1);
-        assert!(!chain.chainKey.key.is_empty());
+        assert!(!chain.chainKey.is_closed());
         assert!(chain.messageKeys.is_empty());
         assert!(entry.pendingPreKey.is_some());
     }
@@ -530,6 +625,6 @@ mod tests {
         let mk_ratchet = derive_secrets(&shared_ratchet, root_key, b"WhisperRatchet").unwrap();
 
         let chain = entry.chains.values().next().unwrap();
-        assert_eq!(chain.chainKey.key, crate::util::b64(&mk_ratchet[1]));
+        assert_eq!(chain.chainKey.key, Some(crate::util::b64(&mk_ratchet[1])));
     }
 }

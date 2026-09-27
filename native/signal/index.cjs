@@ -10,6 +10,30 @@ let nativeBinding = null
 let __napiLoadedBindingTarget = 'native'
 const loadErrors = []
 
+/* oktz-signal:hand-maintained:begin version-check-helpers */
+// hand-maintained patch, not emitted by `napi build`. Every binding version
+// check below was gated on NAPI_RS_ENFORCE_VERSION_CHECK, which is unset by
+// default: a platform package left behind by an earlier install loaded in
+// silence, and a mismatched NAPI-RS ABI surfaced later as a crash inside the
+// addon rather than as a version error. With enforcement switched on the
+// version error was thrown inside the same `try` that guards the require, so
+// the `catch` re-buried it as a MODULE_NOT_FOUND candidate miss. The checks
+// are now unconditional, and a mismatch propagates out of requireNative()
+// instead of joining the candidate list.
+const __napiBindingVersionIsStale = (bindingPackageVersion) => bindingPackageVersion !== '0.3.0-rc.1'
+
+const __napiBindingVersionMismatch = (bindingPackageVersion, flavor) => {
+  const error = new Error(`${flavor || 'Native'} binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+  error.code = 'ERR_NAPI_BINDING_VERSION_MISMATCH'
+  return error
+}
+
+const __napiPushLoadError = (e) => {
+  if (e && e.code === 'ERR_NAPI_BINDING_VERSION_MISMATCH') throw e
+  loadErrors.push(e)
+}
+/* oktz-signal:hand-maintained:end version-check-helpers */
+
 const isMusl = () => {
   let musl = false
   if (process.platform === 'linux') {
@@ -37,8 +61,21 @@ const isMuslFromFilesystem = () => {
 const isMuslFromReport = () => {
   let report = null
   if (process.report && typeof process.report.getReport === 'function') {
+    /* oktz-signal:hand-maintained:begin musl-report-scoping */
+    // hand-maintained patch, not emitted by `napi build`: the flag is scoped to
+    // the getReport() call and restored in a finally. Setting it permanently
+    // mutated process-global state on a library `require` -- the flag stuck and
+    // the `network` section vanished from every report the host app emitted
+    // afterwards. getReport() is the only consumer, so the value is restored
+    // even when it throws.
+    const excludeNetwork = process.report.excludeNetwork
     process.report.excludeNetwork = true
-    report = process.report.getReport()
+    try {
+      report = process.report.getReport()
+    } finally {
+      process.report.excludeNetwork = excludeNetwork
+    }
+    /* oktz-signal:hand-maintained:end musl-report-scoping */
   }
   if (!report) {
     return null
@@ -56,12 +93,27 @@ const isMuslFromReport = () => {
 
 const isMuslFromChildProcess = () => {
   try {
-    return require('child_process').execSync('ldd --version', { encoding: 'utf8' }).includes('musl')
+    /* oktz-signal:hand-maintained:begin musl-probe-stdio */
+    // hand-maintained patch, not emitted by `napi build`: stdin and stderr are
+    // discarded. execSync's default stdio inherits them from this process, so
+    // a failed probe printed the shell's own diagnostics into the host
+    // application's stderr -- noise attributed to the host, from a probe whose
+    // only output of interest is the stdout captured below.
+    return require('child_process').execSync('ldd --version', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).includes('musl')
+    /* oktz-signal:hand-maintained:end musl-probe-stdio */
   } catch (e) {
     // If we reach this case, we don't know if the system is musl or not, so is better to just fallback to false
     return false
   }
 }
+
+/* oktz-signal:hand-maintained:begin version-check-sites */
+// hand-maintained patch, not emitted by `napi build`: the two edits above
+// reach every candidate catch and every version check in this file. Those 78
+// sites are scattered through the generated dispatch chain rather than sitting
+// in one block, so they cannot be bracketed by these markers; `verify` pins
+// their exact counts (26 version checks, 52 load-error records) instead.
+/* oktz-signal:hand-maintained:end version-check-sites */
 
 function requireNative() {
   if (process.env.NAPI_RS_NATIVE_LIBRARY_PATH) {
@@ -77,40 +129,51 @@ function requireNative() {
           : 'native'
       return overrideBinding
     } catch (err) {
-      loadErrors.push(err)
+      /* oktz-signal:hand-maintained:begin override-fallback */
+      // hand-maintained patch, not emitted by `napi build`: a failed override is
+      // recorded by name, so the operator who set the variable can find it in
+      // the cause chain instead of it surfacing as a bare resolution failure.
+      loadErrors.push(new Error(`NAPI_RS_NATIVE_LIBRARY_PATH could not be loaded: ${err && err.message ? err.message : String(err)}`))
+      /* oktz-signal:hand-maintained:end override-fallback */
     }
-  } else if (process.platform === 'android') {
+  }
+  // hand-maintained patch, not emitted by `napi build`: an override is an
+  // override, not a replacement. As the head of this if/else chain a bad
+  // NAPI_RS_NATIVE_LIBRARY_PATH disabled every platform fallback below and
+  // broke a working install; the override is now a standalone step, and its
+  // failure is recorded above by name so it stays findable in the cause chain.
+  if (process.platform === 'android') {
     if (process.arch === 'arm64') {
       try {
         return require('./signal.android-arm64.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-android-arm64')
         const bindingPackageVersion = require('@oktz-signal/signal-android-arm64/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else if (process.arch === 'arm') {
       try {
         return require('./signal.android-arm-eabi.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-android-arm-eabi')
         const bindingPackageVersion = require('@oktz-signal/signal-android-arm-eabi/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else {
       loadErrors.push(new Error(`Unsupported architecture on Android ${process.arch}`))
@@ -121,66 +184,66 @@ function requireNative() {
         try {
           return require('./signal.win32-x64-gnu.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-win32-x64-gnu')
           const bindingPackageVersion = require('@oktz-signal/signal-win32-x64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       } else {
         try {
           return require('./signal.win32-x64-msvc.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-win32-x64-msvc')
           const bindingPackageVersion = require('@oktz-signal/signal-win32-x64-msvc/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       }
     } else if (process.arch === 'ia32') {
       try {
         return require('./signal.win32-ia32-msvc.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-win32-ia32-msvc')
         const bindingPackageVersion = require('@oktz-signal/signal-win32-ia32-msvc/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else if (process.arch === 'arm64') {
       try {
         return require('./signal.win32-arm64-msvc.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-win32-arm64-msvc')
         const bindingPackageVersion = require('@oktz-signal/signal-win32-arm64-msvc/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else {
       loadErrors.push(new Error(`Unsupported architecture on Windows: ${process.arch}`))
@@ -189,49 +252,49 @@ function requireNative() {
     try {
       return require('./signal.darwin-universal.node')
     } catch (e) {
-      loadErrors.push(e)
+      __napiPushLoadError(e)
     }
     try {
       const binding = require('@oktz-signal/signal-darwin-universal')
       const bindingPackageVersion = require('@oktz-signal/signal-darwin-universal/package.json').version
-      if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-        throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+      if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+        throw __napiBindingVersionMismatch(bindingPackageVersion)
       }
       return binding
     } catch (e) {
-      loadErrors.push(e)
+      __napiPushLoadError(e)
     }
     if (process.arch === 'x64') {
       try {
         return require('./signal.darwin-x64.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-darwin-x64')
         const bindingPackageVersion = require('@oktz-signal/signal-darwin-x64/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else if (process.arch === 'arm64') {
       try {
         return require('./signal.darwin-arm64.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-darwin-arm64')
         const bindingPackageVersion = require('@oktz-signal/signal-darwin-arm64/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else {
       loadErrors.push(new Error(`Unsupported architecture on macOS: ${process.arch}`))
@@ -241,33 +304,33 @@ function requireNative() {
       try {
         return require('./signal.freebsd-x64.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-freebsd-x64')
         const bindingPackageVersion = require('@oktz-signal/signal-freebsd-x64/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else if (process.arch === 'arm64') {
       try {
         return require('./signal.freebsd-arm64.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-freebsd-arm64')
         const bindingPackageVersion = require('@oktz-signal/signal-freebsd-arm64/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else {
       loadErrors.push(new Error(`Unsupported architecture on FreeBSD: ${process.arch}`))
@@ -278,33 +341,33 @@ function requireNative() {
         try {
           return require('./signal.linux-x64-musl.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-x64-musl')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-x64-musl/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       } else {
         try {
           return require('./signal.linux-x64-gnu.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-x64-gnu')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-x64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       }
     } else if (process.arch === 'arm64') {
@@ -312,33 +375,33 @@ function requireNative() {
         try {
           return require('./signal.linux-arm64-musl.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-arm64-musl')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-arm64-musl/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       } else {
         try {
           return require('./signal.linux-arm64-gnu.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-arm64-gnu')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-arm64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       }
     } else if (process.arch === 'arm') {
@@ -346,33 +409,33 @@ function requireNative() {
         try {
           return require('./signal.linux-arm-musleabihf.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-arm-musleabihf')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-arm-musleabihf/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       } else {
         try {
           return require('./signal.linux-arm-gnueabihf.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-arm-gnueabihf')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-arm-gnueabihf/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       }
     } else if (process.arch === 'loong64') {
@@ -380,33 +443,33 @@ function requireNative() {
         try {
           return require('./signal.linux-loong64-musl.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-loong64-musl')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-loong64-musl/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       } else {
         try {
           return require('./signal.linux-loong64-gnu.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-loong64-gnu')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-loong64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       }
     } else if (process.arch === 'riscv64') {
@@ -414,66 +477,66 @@ function requireNative() {
         try {
           return require('./signal.linux-riscv64-musl.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-riscv64-musl')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-riscv64-musl/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       } else {
         try {
           return require('./signal.linux-riscv64-gnu.node')
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
         try {
           const binding = require('@oktz-signal/signal-linux-riscv64-gnu')
           const bindingPackageVersion = require('@oktz-signal/signal-linux-riscv64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion)
           }
           return binding
         } catch (e) {
-          loadErrors.push(e)
+          __napiPushLoadError(e)
         }
       }
     } else if (process.arch === 'ppc64') {
       try {
         return require('./signal.linux-ppc64-gnu.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-linux-ppc64-gnu')
         const bindingPackageVersion = require('@oktz-signal/signal-linux-ppc64-gnu/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else if (process.arch === 's390x') {
       try {
         return require('./signal.linux-s390x-gnu.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-linux-s390x-gnu')
         const bindingPackageVersion = require('@oktz-signal/signal-linux-s390x-gnu/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else {
       loadErrors.push(new Error(`Unsupported architecture on Linux: ${process.arch}`))
@@ -483,49 +546,49 @@ function requireNative() {
       try {
         return require('./signal.openharmony-arm64.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-openharmony-arm64')
         const bindingPackageVersion = require('@oktz-signal/signal-openharmony-arm64/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else if (process.arch === 'x64') {
       try {
         return require('./signal.openharmony-x64.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-openharmony-x64')
         const bindingPackageVersion = require('@oktz-signal/signal-openharmony-x64/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else if (process.arch === 'arm') {
       try {
         return require('./signal.openharmony-arm.node')
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
       try {
         const binding = require('@oktz-signal/signal-openharmony-arm')
         const bindingPackageVersion = require('@oktz-signal/signal-openharmony-arm/package.json').version
-        if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+          throw __napiBindingVersionMismatch(bindingPackageVersion)
         }
         return binding
       } catch (e) {
-        loadErrors.push(e)
+        __napiPushLoadError(e)
       }
     } else {
       loadErrors.push(new Error(`Unsupported architecture on OpenHarmony: ${process.arch}`))
@@ -631,6 +694,16 @@ if (!nativeBinding || forceWasi) {
     }
     return null
   }
+  /* oktz-signal:hand-maintained:begin wasi-candidate-errors */
+  // hand-maintained patch, not emitted by `napi build`: an absent WASI
+  // candidate is a missing optional artifact, not a load failure, so both
+  // candidates below record into `wasiBindingErrors` only. `napi.config.json`
+  // ships no wasm target, so both are unresolved on every install; pushing them
+  // into `loadErrors` put a MODULE_NOT_FOUND at the head of the cause chain and
+  // made a real native failure surface as the misleading "npm has a bug related
+  // to optional dependencies" advice. The explicit WASI error path below still
+  // reports them, through `wasiBindingErrors`.
+  /* oktz-signal:hand-maintained:end wasi-candidate-errors */
   if (!wasiBindingLoaded && (!__napiWasiFlavorRequested || __napiWasiFlavor === 'wasm32-wasi')) {
     let candidateError = null
     let candidateFailed = false
@@ -649,7 +722,6 @@ if (!nativeBinding || forceWasi) {
     }
     if (candidateFailed) {
       wasiBindingErrors.push(candidateError)
-      loadErrors.push(candidateError)
     }
   }
   if (!wasiBindingLoaded && (!__napiWasiFlavorRequested || __napiWasiFlavor === 'wasm32-wasi')) {
@@ -659,12 +731,18 @@ if (!nativeBinding || forceWasi) {
       candidateError = __napiWasiResolveCandidate('@oktz-signal/signal-wasm32-wasi', true, undefined)
       candidateFailed = candidateError !== null
       if (!candidateFailed) {
-        if (process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+        /* oktz-signal:hand-maintained:begin wasi-version-check */
+        // hand-maintained patch, not emitted by `napi build`: the WASI package
+        // was gated on the same opt-in flag as every native platform package,
+        // and is enforced identically. Leaving one opt-in site would have
+        // meant a stale WASI package still loading silently.
+        {
           const bindingPackageVersion = require('@oktz-signal/signal-wasm32-wasi/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1') {
-            throw new Error(`WASI binding package version mismatch, expected 0.3.0-rc.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (__napiBindingVersionIsStale(bindingPackageVersion)) {
+            throw __napiBindingVersionMismatch(bindingPackageVersion, 'WASI')
           }
         }
+        /* oktz-signal:hand-maintained:end wasi-version-check */
         wasiBinding = require('@oktz-signal/signal-wasm32-wasi')
         nativeBinding = wasiBinding
         __napiLoadedBindingTarget = 'wasm32-wasi'
@@ -676,7 +754,6 @@ if (!nativeBinding || forceWasi) {
     }
     if (candidateFailed) {
       wasiBindingErrors.push(candidateError)
-      loadErrors.push(candidateError)
     }
   }
   if (
@@ -700,10 +777,20 @@ if (!nativeBinding || forceWasi) {
 
 if (!nativeBinding) {
   if (loadErrors.length > 0) {
+    /* oktz-signal:hand-maintained:begin npm-advice-gating */
+    // hand-maintained patch, not emitted by `napi build`: "npm has a bug
+    // related to optional dependencies" is only actionable advice when the
+    // candidates genuinely failed to resolve. Printed over a dlopen or
+    // corruption failure it sends the reader after a reinstall that cannot
+    // help, so it is now gated on the errors it actually applies to.
+    const unresolvedOnly = loadErrors.every((e) => e && e.code === 'MODULE_NOT_FOUND')
+    /* oktz-signal:hand-maintained:end npm-advice-gating */
     const error = new Error(
       `Cannot find native binding. ` +
-        `npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). ` +
-        'Please try `npm i` again after removing both package-lock.json and node_modules directory.',
+        (unresolvedOnly
+          ? `npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). ` +
+            'Please try `npm i` again after removing both package-lock.json and node_modules directory.'
+          : 'The binding candidates below exist but failed to load. See the cause chain for the real error.'),
     )
     // assign instead of the `new Error(message, { cause })` options form,
     // which Node < 16.9 silently ignores
@@ -794,4 +881,9 @@ module.exports.sessionHaveOpenSession = nativeBinding.sessionHaveOpenSession
 module.exports.sessionSerialize = nativeBinding.sessionSerialize
 module.exports.x3DhBuildInitialSession = nativeBinding.x3DhBuildInitialSession
 module.exports.x3DhBuildRecipientSession = nativeBinding.x3DhBuildRecipientSession
+/* oktz-signal:hand-maintained:begin default-export */
+// hand-maintained patch, not emitted by `napi build`: the CommonJS entry is
+// also consumed as an ES module, so `default` has to resolve to the binding
+// itself. tests/platform-loader.test.mjs asserts `native.default === native`.
 module.exports.default = nativeBinding
+/* oktz-signal:hand-maintained:end default-export */

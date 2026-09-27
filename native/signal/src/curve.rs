@@ -13,8 +13,10 @@ use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
 use curve25519_dalek::MontgomeryPoint;
 
-use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+use ed25519_dalek::{VerifyingKey, Signature};
 
+use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha512};
 
 /// B-poin Edwards (base point) yang sama dengan B di curve25519-js.
@@ -42,15 +44,6 @@ fn clamp_scalar(sk: &[u8; 32]) -> [u8; 32] {
     a[31] &= 127;
     a[31] |= 64;
     a
-}
-
-/// r = SHA512(sk || m) mod L  → Scalar (crypto_sign_direct)
-fn nonce_direct(sk: &[u8; 32], msg: &[u8]) -> Scalar {
-    let mut h = Sha512::new();
-    h.update(sk);
-    h.update(msg);
-    let digest: [u8; 64] = h.finalize().into();
-    Scalar::from_bytes_mod_order_wide(&digest)
 }
 
 /// r = SHA512(0xfe 0xff*31 || sk || m || rnd) mod L (crypto_sign_direct_rnd)
@@ -83,7 +76,7 @@ fn challenge(r: &[u8; 32], a: &[u8; 32], msg: &[u8]) -> Scalar {
 
 /// Sign inti. sk = clamped secret (32B). Mengembalikan signature 64 byte
 /// (R || S), dengan sign bit dari pubkey di byte ke-63 (persis curve25519-js).
-fn sign_internal(sk_raw: &[u8; 32], msg: &[u8], rnd: Option<&[u8; 64]>) -> [u8; 64] {
+fn sign_internal(sk_raw: &[u8; 32], msg: &[u8], rnd: &[u8; 64]) -> [u8; 64] {
     let sk = clamp_scalar(sk_raw);
     // scalar a untuk pubkey & S. JS pakai byte mentah (mod L), sama saja.
     let a = Scalar::from_bytes_mod_order(sk);
@@ -91,11 +84,8 @@ fn sign_internal(sk_raw: &[u8; 32], msg: &[u8], rnd: Option<&[u8; 64]>) -> [u8; 
     let a_bytes = base_mult_scalar(&a);
     let sign_bit = a_bytes[31] & 128;
 
-    // r (nonce) — beda jalur: direct vs rnd (hash separation).
-    let r = match rnd {
-        Some(rnd) => nonce_rnd(&sk, msg, rnd),
-        None => nonce_direct(&sk, msg),
-    };
+    // r (nonce) = SHA512(0xfe 0xff*31 || sk || m || rnd) mod L
+    let r = nonce_rnd(&sk, msg, rnd);
 
     // R = r*B, packed
     let r_bytes = base_mult_scalar(&r);
@@ -130,13 +120,24 @@ fn pubkey_montgomery_to_edwards(pk: &[u8; 32], sign_bit: u8) -> Option<EdwardsPo
 /// sign(secretKey, msg, opt_random?) → signature 64 byte (XEdDSA)
 pub fn sign(secret_key: &[u8], msg: &[u8], opt_random: Option<&[u8]>) -> Result<[u8; 64], String> {
     check_len(secret_key, 32, "secret key")?;
-    let mut rnd: Option<[u8; 64]> = None;
-    if let Some(r) = opt_random {
-        check_len(r, 64, "random data")?;
-        rnd = Some(r[..64].try_into().unwrap());
-    }
+    // The nonce must come from a CSPRNG. Deriving it as SHA512(sk||m) made it
+    // deterministic, so two signatures over chosen messages recovered the
+    // identity key (hidden-number-problem lattice attack). rnd stays
+    // injectable so the libsignal-parity oracle and known-answer vectors can
+    // still pin a fixed nonce.
+    let mut generated = [0u8; 64];
+    let rnd: [u8; 64] = match opt_random {
+        Some(r) => {
+            check_len(r, 64, "random data")?;
+            r[..64].try_into().unwrap()
+        }
+        None => {
+            OsRng.fill_bytes(&mut generated);
+            generated
+        }
+    };
     let sk: [u8; 32] = secret_key[..32].try_into().unwrap();
-    let sig = sign_internal(&sk, msg, rnd.as_ref());
+    let sig = sign_internal(&sk, msg, &rnd);
     Ok(sig)
 }
 
@@ -171,12 +172,24 @@ pub fn verify(public_key: &[u8], msg: &[u8], signature: &[u8]) -> Result<bool, S
         Ok(v) => v,
         Err(_) => return Ok(false),
     };
-    Ok(vk.verify(msg, &signature).is_ok())
+    // verify_strict, not verify: the cofactorless equation accepts low-order
+    // keys and low-order R, which lets a forged signature pass. A bundle-supplied
+    // identity key must never be able to authenticate that way.
+    Ok(vk.verify_strict(msg, &signature).is_ok())
 }
 
 // --- X25519 DH (untuk X3DH/double ratchet di signal) ---
 // CATATAN: dalek 4.1.x menghapus modul `x25519` (StaticSecret dkk). Pakai
 // MontgomeryPoint::mul_base_clamped / mul_clamped — clamping RFC 7748 sama.
+
+/// Seed carries no usable entropy. Clamping maps a constant seed to a valid
+/// scalar, so it yields a publicly known private key. A random 32-byte seed
+/// averages 128 bits set (sd ~8); reject the two constant bit patterns and
+/// anything with too little weight to be entropy.
+fn seed_is_degenerate(seed: &[u8; 32]) -> bool {
+    let bits: u32 = seed.iter().map(|b| b.count_ones()).sum();
+    bits <= 32 || bits == 256
+}
 
 /// generate_keypair(seed) → (public_key, secret_key) 32 byte (X25519)
 ///
@@ -185,6 +198,9 @@ pub fn verify(public_key: &[u8], msg: &[u8], signature: &[u8]) -> Result<bool, S
 pub fn generate_keypair(seed: &[u8]) -> Result<([u8; 32], [u8; 32]), String> {
     check_len(seed, 32, "seed")?;
     let seed32: [u8; 32] = seed[..32].try_into().unwrap();
+    if seed_is_degenerate(&seed32) {
+        return Err("seed is degenerate: not enough entropy for a private key".to_string());
+    }
     let public = MontgomeryPoint::mul_base_clamped(seed32);
     Ok((public.to_bytes(), seed32))
 }
@@ -259,7 +275,10 @@ mod tests {
 
     #[test]
     fn test_verify_rejects_tampered() {
-        let sk = [0x01u8; 32];
+        // [0x01; 32] is a degenerate seed (one bit per byte) and is now
+        // rejected by generate_keypair; the assertion under test is about
+        // tampering, not about the seed.
+        let sk = [0x37u8; 32];
         let msg = b"integrity check";
         let sig = sign(&sk, msg, None).unwrap();
         let (pk, _) = generate_keypair(&sk).unwrap();
@@ -267,12 +286,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sign_deterministic() {
-        let sk = [0x22u8; 32];
-        let msg = b"same input same sig";
-        let s1 = sign(&sk, msg, None).unwrap();
-        let s2 = sign(&sk, msg, None).unwrap();
-        assert_eq!(s1, s2);
+    fn test_generate_keypair_rejects_degenerate_seeds() {
+        // Clamping turns a constant seed into a valid scalar, so
+        // curveGenerateKeypair(Buffer.alloc(32)) returns a publicly known
+        // private key. The same holds for any seed carrying no usable entropy.
+        let mut low_bit = [0u8; 32];
+        low_bit[0] = 0x01;
+        let mut high_bit = [0u8; 32];
+        high_bit[31] = 0x80;
+        for (name, seed) in [
+            ("all-zero", [0u8; 32]),
+            ("all-0xFF", [0xFFu8; 32]),
+            ("one bit at the bottom", low_bit),
+            ("one bit at the top", high_bit),
+            ("one bit per byte", [1u8; 32]),
+        ] {
+            match generate_keypair(&seed) {
+                Ok(_) => panic!("{} seed must be rejected", name),
+                Err(e) => assert!(e.contains("seed"), "{}: error must name the seed, got: {}", name, e),
+            }
+        }
     }
 
     #[test]
@@ -309,14 +342,63 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_rejects_low_order_public_key() {
+        // u = 0 is a low-order Montgomery point; the Edwards point it maps to has
+        // order 2. The cofactorless equation is satisfiable there with a
+        // signature forged without the real key, so the signed-prekey check at
+        // x3dh would accept any bundle naming this public key.
+        let a_point = pubkey_montgomery_to_edwards(&[0u8; 32], 0).unwrap();
+        let a_bytes = a_point.compress().to_bytes();
+        assert!(a_point.is_small_order(), "u=0 must map to a small-order point");
+
+        // R = A with S = 0 satisfies [S]B == R + [h]A whenever h is odd.
+        let mut msg: Vec<u8> = Vec::new();
+        let mut found = false;
+        for i in 0..64u8 {
+            msg = [b"forged prekey bundle".as_slice(), &[i]].concat();
+            if challenge(&a_bytes, &a_bytes, &msg).to_bytes()[0] & 1 == 1 {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected an odd challenge for some probe message");
+
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&a_bytes);
+        assert!(
+            !verify(&[0u8; 32], &msg, &sig).unwrap(),
+            "a low-order public key must never accept a forged signature"
+        );
+    }
+
+    #[test]
+    fn test_sign_nonce_is_random_without_rnd() {
+        // RFC 8032 hashes a CSPRNG 32-byte prefix precisely so that two
+        // signatures over chosen messages cannot recover the identity key via a
+        // hidden-number-problem lattice attack. rnd = None must therefore not
+        // fall back to the deterministic SHA512(sk||m) nonce.
+        let sk = [0x77u8; 32];
+        let msg = b"deterministic nonce leak";
+        let s1 = sign(&sk, msg, None).unwrap();
+        let s2 = sign(&sk, msg, None).unwrap();
+        assert_ne!(s1, s2, "rnd = None must not derive a deterministic nonce");
+
+        let rnd = [0xEFu8; 64];
+        let a = sign(&sk, msg, Some(&rnd)).unwrap();
+        let b = sign(&sk, msg, Some(&rnd)).unwrap();
+        assert_eq!(a, b, "an explicit rnd must still reproduce a fixed signature");
+    }
+
+    #[test]
     fn test_xeddsa_known_answer() {
-        // Vektor tetap: sign(alice_sk, b"known answer test") — deterministik.
-        // Nilai diverifikasi dengan implementasi bit-exact (self-consistency
-        // regression test setelah sign_internal stabil).
+        // Vektor tetap dari curve25519-js (implementasi yang dipakai libsignal):
+        // sign(alice_sk, b"known answer test", rnd = 0xEF*64). Dihasilkan dari
+        // curve25519-js, bukan dari kode ini — tetap vektor eksternal, kini
+        // melalui jalur rnd karena nonce tanpa rnd sudah diacak.
         let sk = hex_to_bytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
-        let expected_sig = "463d2ebbfc57cfc5c879c028f08e6f3fdc44682c19b6192f54a37cc5a8323d4bc8e572ac577ea909ebda5a3aa3187722d1ad3b0e8c552fc430d0c09e1330be87";
+        let expected_sig = "7b5664ddd65206b6e4f72926c4b8095e5639f2d706491e59dc8a9948ad81c67ccb5e9ed8e285b8136cea2a015639be2bb89042ec34816aaa7becfca726415981";
         let msg = b"known answer test";
-        let sig = sign(&sk, msg, None).unwrap();
+        let sig = sign(&sk, msg, Some(&[0xEFu8; 64])).unwrap();
         assert_eq!(bytes_to_hex(&sig), expected_sig);
         let (pk, _) = generate_keypair(&sk).unwrap();
         assert!(verify(&pk, msg, &sig).unwrap());

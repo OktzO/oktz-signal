@@ -1,8 +1,7 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const native = require('../native/signal/index.cjs');
-import { QueueJob } from './queue-job.js';
-import { SessionRecord } from './session-record.js';
+import { SessionRecord, sharedQueue } from './session-record.js';
 
 // Native X25519 expects 32-byte keys. baileys bundles carry 33-byte
 // (0x05-prefixed) public keys; strip the prefix when a 32-byte key is expected.
@@ -12,35 +11,34 @@ export class SessionBuilder {
   constructor(storage, protocolAddress) {
     this.storage = storage;
     this.addr = protocolAddress;
-    this._queue = new QueueJob();
   }
 
   async initOutgoing(device) {
-    return this._queue.add(this.addr.toString(), async () => {
-      const identity = await this.storage.getOurIdentity();
-      const regId = await this.storage.getOurRegistrationId();
-      const signedPreKey = await this.storage.loadSignedPreKey();
-      const recipientKey = device.identityKey;
-      if (!recipientKey) throw new Error('No identity key for recipient');
+    return sharedQueue(this.storage, this.addr.toString())
+      .add(this.addr.toString(), async () => {
+        const identity = await this.storage.getOurIdentity();
+        const regId = await this.storage.getOurRegistrationId();
+        const recipientKey = device.identityKey;
+        if (!recipientKey) throw new Error('No identity key for recipient');
 
-      // Initator X3DH: signed_prekey_pub (3rd) dikirim 33-byte penuh — signature
-      // dibuat atas 33-byte. Native strip internal untuk DH (spk = [1..]).
-      // prekey_pub (5th) juga 33-byte — native strip internal. recipient_pub (7th)
-      // tetap 33-byte, native strip [1..33]. signed_prekey_sig (4th) 64 bytes.
-      const sessionJson = native.x3DhBuildInitialSession(
-        Buffer.from(identity.privKey),
-        Buffer.from(identity.pubKey),
-        Buffer.from(device.signedPreKey.publicKey),
-        Buffer.from(device.signedPreKey.signature),
-        device.preKey ? Buffer.from(device.preKey.publicKey) : null,
-        device.preKey ? (device.preKey.keyId != null ? device.preKey.keyId : null) : null,
-        Buffer.from(recipientKey),
-        Buffer.from(device.signedPreKey.publicKey),
-        regId,
-        device.signedPreKey.keyId != null ? device.signedPreKey.keyId : 0
-      );
-      await this.storage.storeSession(this.addr.toString(), new SessionRecord(sessionJson));
-    });
+        // Initator X3DH: signed_prekey_pub (3rd) dikirim 33-byte penuh — signature
+        // dibuat atas 33-byte. Native strip internal untuk DH (spk = [1..]).
+        // prekey_pub (5th) juga 33-byte — native strip internal. recipient_pub (7th)
+        // tetap 33-byte, native strip [1..33]. signed_prekey_sig (4th) 64 bytes.
+        const sessionJson = native.x3DhBuildInitialSession(
+          Buffer.from(identity.privKey),
+          Buffer.from(identity.pubKey),
+          Buffer.from(device.signedPreKey.publicKey),
+          Buffer.from(device.signedPreKey.signature),
+          device.preKey ? Buffer.from(device.preKey.publicKey) : null,
+          device.preKey ? (device.preKey.keyId != null ? device.preKey.keyId : null) : null,
+          Buffer.from(recipientKey),
+          Buffer.from(device.signedPreKey.publicKey),
+          regId,
+          device.signedPreKey.keyId != null ? device.signedPreKey.keyId : 0
+        );
+        await this.storage.storeSession(this.addr.toString(), new SessionRecord(sessionJson));
+      });
   }
 
   // Build recipient session from an incoming PreKeyWhisperMessage (no open
@@ -51,17 +49,26 @@ export class SessionBuilder {
   async initIncoming(record, message) {
     const identity = await this.storage.getOurIdentity();
     const preKeyId = message.pre_key_id != null ? message.pre_key_id : message.preKeyId;
-    const preKeyPair = preKeyId != null ? await this.storage.loadPreKey(preKeyId) : null;
+    // A pkmsg naming a prekey we cannot resolve must be rejected here. Building
+    // the session without DH4 and failing later surfaces as an opaque MAC error
+    // against a message that was never going to verify.
+    let preKeyPair = null;
+    if (preKeyId != null) {
+      preKeyPair = await this.storage.loadPreKey(preKeyId);
+      if (!preKeyPair) throw new Error(`Missing prekey ${preKeyId}`);
+    }
     // Signed prekey lookup by ID when the pkmsg carries one (rotation support);
     // fall back to argless loadSignedPreKey() for legacy callers. A mismatch
     // (sender used a rotated-away SPK) surfaces as a clear error instead of a
-    // misleading MAC failure.
+    // misleading MAC failure. The id is offered rather than arity-sniffed:
+    // Function.length is 0 for a (...args) or default-param storage.
     const signedPreKeyId = message.signed_pre_key_id != null
       ? message.signed_pre_key_id
       : message.signedPreKeyId;
     let signedPreKeyPair = null;
-    if (signedPreKeyId != null && this.storage.loadSignedPreKey.length > 0) {
-      signedPreKeyPair = await this.storage.loadSignedPreKey(signedPreKeyId);
+    if (signedPreKeyId != null) {
+      // A storage that insists on an argless call throws rather than returning.
+      try { signedPreKeyPair = await this.storage.loadSignedPreKey(signedPreKeyId); } catch {}
     }
     if (!signedPreKeyPair) {
       signedPreKeyPair = await this.storage.loadSignedPreKey();

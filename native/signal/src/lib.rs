@@ -116,9 +116,14 @@ pub fn proto_decode_pkmsg(bytes: Buffer) -> Result<PkmsgObj> {
 
 // ── session ──
 
+// A genuine parse: unmodelled state is rejected here rather than lossily
+// re-serialized. `parse` refuses any field this build does not model, and
+// `validate` refuses a version it does not model, so nothing unrecognized can
+// reach the caller as a record that merely looks well formed.
 #[napi]
 pub fn session_deserialize(json: String) -> Result<String> {
-    let record = session::deserialize(&json).map_err(|e| Error::from_reason(e))?;
+    let record = session::parse(&json).map_err(|e| Error::from_reason(e))?;
+    session::validate(&record).map_err(|e| Error::from_reason(e))?;
     session::serialize(&record).map_err(|e| Error::from_reason(e))
 }
 

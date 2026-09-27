@@ -22,6 +22,7 @@ fn zeroize_map<K, V: Zeroize>(map: &mut BTreeMap<K, V>) {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SessionRecord {
     #[serde(rename = "_sessions", default)]
     pub sessions: BTreeMap<String, SessionEntry>,
@@ -44,6 +45,7 @@ impl Drop for SessionRecord {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SessionEntry {
     pub registrationId: u32,
     pub currentRatchet: Ratchet,
@@ -70,6 +72,7 @@ impl Drop for SessionEntry {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
 pub struct Ratchet {
     pub ephemeralKeyPair: KeyPair,
     #[zeroize(skip)]
@@ -80,6 +83,7 @@ pub struct Ratchet {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
 pub struct KeyPair {
     #[zeroize(skip)]
     pub pubKey: String,
@@ -87,6 +91,7 @@ pub struct KeyPair {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct IndexInfo {
     pub baseKey: String,
     pub baseKeyType: u32,
@@ -97,6 +102,7 @@ pub struct IndexInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Chain {
     pub chainKey: ChainKey,
     pub chainType: u32,
@@ -121,6 +127,7 @@ impl Drop for Chain {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
 pub struct ChainKey {
     #[zeroize(skip)]
     pub counter: i64,
@@ -128,6 +135,7 @@ pub struct ChainKey {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PendingPreKey {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signedKeyId: Option<u32>,
@@ -140,8 +148,29 @@ fn default_version() -> String {
     "v1".to_string()
 }
 
-pub fn deserialize(json: &str) -> Result<SessionRecord, String> {
+// Parse without validating, for callers that want the raw projection.
+pub fn parse(json: &str) -> Result<SessionRecord, String> {
     serde_json::from_str(json).map_err(|e| e.to_string())
+}
+
+// `deny_unknown_fields` already refuses an unmodelled field at any level. This
+// refuses the other way state can be unrecognised: a record that labels itself
+// with a version this build does not model, which would otherwise be used as
+// though it were v1.
+pub fn validate(record: &SessionRecord) -> Result<(), String> {
+    if record.version != "v1" {
+        return Err(format!(
+            "unsupported session record version {:?}, this build reads only \"v1\"",
+            record.version
+        ));
+    }
+    Ok(())
+}
+
+pub fn deserialize(json: &str) -> Result<SessionRecord, String> {
+    let record = parse(json)?;
+    validate(&record)?;
+    Ok(record)
 }
 
 pub fn serialize(record: &SessionRecord) -> Result<String, String> {
@@ -286,5 +315,140 @@ mod tests {
         let json = serialize(&record).unwrap();
         let record2 = deserialize(&json).unwrap();
         assert_eq!(record, record2);
+    }
+
+    // --- strict parse ---
+
+    // Round-trip the fixture through a serde_json::Value so an unmodelled field
+    // can be injected at each level, and assert it is refused. Silently
+    // dropping it destroys session state that the next write persists.
+    // A `serde_json::Value` string index is a literal key, not a path, so the
+    // walk is explicit. `{entry}` and `{chain}` resolve to the fixture's keys.
+    fn with_injected(path: &[&str], key: &str) -> String {
+        let mut v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        let entry = v["_sessions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let chain = v["_sessions"][&entry]["_chains"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let path: Vec<String> = path
+            .iter()
+            .map(|s| s.replace("{entry}", &entry).replace("{chain}", &chain))
+            .chain(std::iter::once(key.to_string()))
+            .collect();
+        let (last, parents) = path.split_last().unwrap();
+        let mut cur = &mut v;
+        for seg in parents {
+            cur = cur
+                .as_object_mut()
+                .unwrap()
+                .entry(seg.clone())
+                .or_insert_with(|| serde_json::json!({}));
+        }
+        cur.as_object_mut()
+            .unwrap()
+            .insert(last.clone(), serde_json::json!("unmodelled"));
+        v.to_string()
+    }
+
+    #[test]
+    fn unmodelled_top_level_field_is_rejected() {
+        let err = deserialize(&with_injected(&[], "futureField")).unwrap_err();
+        assert!(
+            err.contains("futureField"),
+            "an unmodelled top-level field must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn unmodelled_entry_field_is_rejected() {
+        let err = deserialize(&with_injected(&["_sessions", "{entry}"], "futureField")).unwrap_err();
+        assert!(
+            err.contains("futureField"),
+            "an unmodelled session-entry field must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn unmodelled_chain_field_is_rejected() {
+        let json = with_injected(&["_sessions", "{entry}", "_chains", "{chain}"], "futureField");
+        let err = deserialize(&json).unwrap_err();
+        assert!(
+            err.contains("futureField"),
+            "an unmodelled chain field must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn unmodelled_pending_pre_key_field_is_rejected() {
+        let json = with_injected(&["_sessions", "{entry}", "pendingPreKey"], "extraKey");
+        let err = deserialize(&json).unwrap_err();
+        assert!(
+            err.contains("extraKey"),
+            "an unmodelled pendingPreKey field must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn unmodelled_ratchet_field_is_rejected() {
+        let json = with_injected(&["_sessions", "{entry}", "currentRatchet"], "futureRatchetField");
+        let err = deserialize(&json).unwrap_err();
+        assert!(
+            err.contains("futureRatchetField"),
+            "an unmodelled currentRatchet field must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn unmodelled_field_is_rejected_at_every_level() {
+        // The parse must not merely refuse the top level: an unmodelled field
+        // nested inside an entry, a chain or pendingPreKey is the same loss.
+        for path in [
+            vec!["_sessions", "{entry}"],
+            vec!["_sessions", "{entry}", "_chains", "{chain}"],
+            vec!["_sessions", "{entry}", "currentRatchet"],
+            vec!["_sessions", "{entry}", "pendingPreKey"],
+        ] {
+            let json = with_injected(&path, "futureField");
+            assert!(
+                deserialize(&json).is_err(),
+                "an unmodelled futureField at {} must be rejected",
+                path.join(".")
+            );
+        }
+    }
+
+    #[test]
+    fn unmodelled_version_is_rejected() {
+        let mut v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        v["version"] = serde_json::json!("v2");
+        let err = deserialize(&v.to_string()).unwrap_err();
+        assert!(
+            err.contains("version"),
+            "a version this build does not model must be named, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn missing_version_still_defaults_to_v1() {
+        let mut v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        v.as_object_mut().unwrap().remove("version");
+        let record = deserialize(&v.to_string()).unwrap();
+        assert_eq!(record.version, "v1");
     }
 }

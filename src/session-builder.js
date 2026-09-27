@@ -18,7 +18,6 @@ export class SessionBuilder {
       .add(this.addr.toString(), async () => {
         const identity = await this.storage.getOurIdentity();
         const regId = await this.storage.getOurRegistrationId();
-        const signedPreKey = await this.storage.loadSignedPreKey();
         const recipientKey = device.identityKey;
         if (!recipientKey) throw new Error('No identity key for recipient');
 
@@ -50,17 +49,26 @@ export class SessionBuilder {
   async initIncoming(record, message) {
     const identity = await this.storage.getOurIdentity();
     const preKeyId = message.pre_key_id != null ? message.pre_key_id : message.preKeyId;
-    const preKeyPair = preKeyId != null ? await this.storage.loadPreKey(preKeyId) : null;
+    // A pkmsg naming a prekey we cannot resolve must be rejected here. Building
+    // the session without DH4 and failing later surfaces as an opaque MAC error
+    // against a message that was never going to verify.
+    let preKeyPair = null;
+    if (preKeyId != null) {
+      preKeyPair = await this.storage.loadPreKey(preKeyId);
+      if (!preKeyPair) throw new Error(`Missing prekey ${preKeyId}`);
+    }
     // Signed prekey lookup by ID when the pkmsg carries one (rotation support);
     // fall back to argless loadSignedPreKey() for legacy callers. A mismatch
     // (sender used a rotated-away SPK) surfaces as a clear error instead of a
-    // misleading MAC failure.
+    // misleading MAC failure. The id is offered rather than arity-sniffed:
+    // Function.length is 0 for a (...args) or default-param storage.
     const signedPreKeyId = message.signed_pre_key_id != null
       ? message.signed_pre_key_id
       : message.signedPreKeyId;
     let signedPreKeyPair = null;
-    if (signedPreKeyId != null && this.storage.loadSignedPreKey.length > 0) {
-      signedPreKeyPair = await this.storage.loadSignedPreKey(signedPreKeyId);
+    if (signedPreKeyId != null) {
+      // A storage that insists on an argless call throws rather than returning.
+      try { signedPreKeyPair = await this.storage.loadSignedPreKey(signedPreKeyId); } catch {}
     }
     if (!signedPreKeyPair) {
       signedPreKeyPair = await this.storage.loadSignedPreKey();

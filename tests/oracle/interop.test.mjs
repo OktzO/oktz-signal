@@ -7,25 +7,41 @@ import assert from 'node:assert';
 import * as libsignal from 'libsignal';
 
 // ─────────────────────────────────────────────────────────────────────
-// Test 1: Curve sign/verify — 100 random cases, both engines match
+// Test 1: Curve sign/verify — 100 random cases, both engines agree
+//
+// The signature BYTES can no longer be compared against libsignal.
+// `libsignal.curve.calculateSignature(privKey, message)` takes two
+// arguments and hard-codes curve25519-js's `crypto_sign_direct`, whose
+// nonce is the deterministic SHA512(sk||m); it exposes no way to inject
+// `opt_random`. oktz deliberately draws a CSPRNG nonce when `rnd` is
+// absent, so the two engines pick different nonces on purpose (RFC 8032
+// hashes a random prefix so that two chosen-message signatures cannot
+// recover the identity key). Bit-exactness of the deterministic path is
+// pinned instead by `curve::tests::test_xeddsa_known_answer`, whose
+// expected signature is taken from curve25519-js.
+//
+// What this test still proves byte-for-byte is public key derivation, and
+// it proves the signing/verifying pair agrees by verifying in BOTH
+// directions across 100 random cases.
 // ─────────────────────────────────────────────────────────────────────
 describe('curve oracle: oktz-signal vs libsignal', () => {
-  it('sign/verify 100 random cases match', () => {
+  it('pubkey derivation is byte-identical, signatures cross-verify, 100 random cases', () => {
     for (let i = 0; i < 100; i++) {
       const msg = randomBytes(32 + Math.floor(Math.random() * 64));
       const privKey = randomBytes(32);
       const pubKey = libsignal.curve.getPublicFromPrivateKey(privKey); // 33 bytes with 0x05 prefix
 
+      assert.ok(
+        native.curveGenerateKeypair(privKey)[0].equals(pubKey.slice(1)),
+        `public key derivation mismatch at case ${i}`);
+
       const sigLibsignal = libsignal.curve.calculateSignature(privKey, msg);
       const sigOktz = Buffer.from(native.curveSign(privKey, msg, null));
 
-      assert.ok(sigLibsignal.equals(sigOktz),
-        `signature mismatch at case ${i}`);
-
-      assert.ok(libsignal.curve.verifySignature(pubKey, msg, sigLibsignal),
-        `libsignal verify failed at case ${i}`);
-      assert.ok(native.curveVerify(pubKey.slice(1), msg, sigOktz),
-        `oktz verify failed at case ${i}`);
+      assert.ok(libsignal.curve.verifySignature(pubKey, msg, sigOktz),
+        `libsignal could not verify the oktz signature at case ${i}`);
+      assert.ok(native.curveVerify(pubKey.slice(1), msg, sigLibsignal),
+        `oktz could not verify the libsignal signature at case ${i}`);
     }
   });
 });

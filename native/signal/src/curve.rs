@@ -15,6 +15,8 @@ use curve25519_dalek::MontgomeryPoint;
 
 use ed25519_dalek::{VerifyingKey, Signature};
 
+use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha512};
 
 /// B-poin Edwards (base point) yang sama dengan B di curve25519-js.
@@ -42,15 +44,6 @@ fn clamp_scalar(sk: &[u8; 32]) -> [u8; 32] {
     a[31] &= 127;
     a[31] |= 64;
     a
-}
-
-/// r = SHA512(sk || m) mod L  → Scalar (crypto_sign_direct)
-fn nonce_direct(sk: &[u8; 32], msg: &[u8]) -> Scalar {
-    let mut h = Sha512::new();
-    h.update(sk);
-    h.update(msg);
-    let digest: [u8; 64] = h.finalize().into();
-    Scalar::from_bytes_mod_order_wide(&digest)
 }
 
 /// r = SHA512(0xfe 0xff*31 || sk || m || rnd) mod L (crypto_sign_direct_rnd)
@@ -83,7 +76,7 @@ fn challenge(r: &[u8; 32], a: &[u8; 32], msg: &[u8]) -> Scalar {
 
 /// Sign inti. sk = clamped secret (32B). Mengembalikan signature 64 byte
 /// (R || S), dengan sign bit dari pubkey di byte ke-63 (persis curve25519-js).
-fn sign_internal(sk_raw: &[u8; 32], msg: &[u8], rnd: Option<&[u8; 64]>) -> [u8; 64] {
+fn sign_internal(sk_raw: &[u8; 32], msg: &[u8], rnd: &[u8; 64]) -> [u8; 64] {
     let sk = clamp_scalar(sk_raw);
     // scalar a untuk pubkey & S. JS pakai byte mentah (mod L), sama saja.
     let a = Scalar::from_bytes_mod_order(sk);
@@ -91,11 +84,8 @@ fn sign_internal(sk_raw: &[u8; 32], msg: &[u8], rnd: Option<&[u8; 64]>) -> [u8; 
     let a_bytes = base_mult_scalar(&a);
     let sign_bit = a_bytes[31] & 128;
 
-    // r (nonce) — beda jalur: direct vs rnd (hash separation).
-    let r = match rnd {
-        Some(rnd) => nonce_rnd(&sk, msg, rnd),
-        None => nonce_direct(&sk, msg),
-    };
+    // r (nonce) = SHA512(0xfe 0xff*31 || sk || m || rnd) mod L
+    let r = nonce_rnd(&sk, msg, rnd);
 
     // R = r*B, packed
     let r_bytes = base_mult_scalar(&r);
@@ -130,13 +120,24 @@ fn pubkey_montgomery_to_edwards(pk: &[u8; 32], sign_bit: u8) -> Option<EdwardsPo
 /// sign(secretKey, msg, opt_random?) → signature 64 byte (XEdDSA)
 pub fn sign(secret_key: &[u8], msg: &[u8], opt_random: Option<&[u8]>) -> Result<[u8; 64], String> {
     check_len(secret_key, 32, "secret key")?;
-    let mut rnd: Option<[u8; 64]> = None;
-    if let Some(r) = opt_random {
-        check_len(r, 64, "random data")?;
-        rnd = Some(r[..64].try_into().unwrap());
-    }
+    // The nonce must come from a CSPRNG. Deriving it as SHA512(sk||m) made it
+    // deterministic, so two signatures over chosen messages recovered the
+    // identity key (hidden-number-problem lattice attack). rnd stays
+    // injectable so the libsignal-parity oracle and known-answer vectors can
+    // still pin a fixed nonce.
+    let mut generated = [0u8; 64];
+    let rnd: [u8; 64] = match opt_random {
+        Some(r) => {
+            check_len(r, 64, "random data")?;
+            r[..64].try_into().unwrap()
+        }
+        None => {
+            OsRng.fill_bytes(&mut generated);
+            generated
+        }
+    };
     let sk: [u8; 32] = secret_key[..32].try_into().unwrap();
-    let sig = sign_internal(&sk, msg, rnd.as_ref());
+    let sig = sign_internal(&sk, msg, &rnd);
     Ok(sig)
 }
 
@@ -270,15 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sign_deterministic() {
-        let sk = [0x22u8; 32];
-        let msg = b"same input same sig";
-        let s1 = sign(&sk, msg, None).unwrap();
-        let s2 = sign(&sk, msg, None).unwrap();
-        assert_eq!(s1, s2);
-    }
-
-    #[test]
     fn test_generate_keypair_roundtrip() {
         let seed = [0x33u8; 32];
         let (pk, sk) = generate_keypair(&seed).unwrap();
@@ -342,14 +334,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sign_nonce_is_random_without_rnd() {
+        // RFC 8032 hashes a CSPRNG 32-byte prefix precisely so that two
+        // signatures over chosen messages cannot recover the identity key via a
+        // hidden-number-problem lattice attack. rnd = None must therefore not
+        // fall back to the deterministic SHA512(sk||m) nonce.
+        let sk = [0x77u8; 32];
+        let msg = b"deterministic nonce leak";
+        let s1 = sign(&sk, msg, None).unwrap();
+        let s2 = sign(&sk, msg, None).unwrap();
+        assert_ne!(s1, s2, "rnd = None must not derive a deterministic nonce");
+
+        let rnd = [0xEFu8; 64];
+        let a = sign(&sk, msg, Some(&rnd)).unwrap();
+        let b = sign(&sk, msg, Some(&rnd)).unwrap();
+        assert_eq!(a, b, "an explicit rnd must still reproduce a fixed signature");
+    }
+
+    #[test]
     fn test_xeddsa_known_answer() {
-        // Vektor tetap: sign(alice_sk, b"known answer test") — deterministik.
-        // Nilai diverifikasi dengan implementasi bit-exact (self-consistency
-        // regression test setelah sign_internal stabil).
+        // Vektor tetap dari curve25519-js (implementasi yang dipakai libsignal):
+        // sign(alice_sk, b"known answer test", rnd = 0xEF*64). Dihasilkan dari
+        // curve25519-js, bukan dari kode ini — tetap vektor eksternal, kini
+        // melalui jalur rnd karena nonce tanpa rnd sudah diacak.
         let sk = hex_to_bytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
-        let expected_sig = "463d2ebbfc57cfc5c879c028f08e6f3fdc44682c19b6192f54a37cc5a8323d4bc8e572ac577ea909ebda5a3aa3187722d1ad3b0e8c552fc430d0c09e1330be87";
+        let expected_sig = "7b5664ddd65206b6e4f72926c4b8095e5639f2d706491e59dc8a9948ad81c67ccb5e9ed8e285b8136cea2a015639be2bb89042ec34816aaa7becfca726415981";
         let msg = b"known answer test";
-        let sig = sign(&sk, msg, None).unwrap();
+        let sig = sign(&sk, msg, Some(&[0xEFu8; 64])).unwrap();
         assert_eq!(bytes_to_hex(&sig), expected_sig);
         let (pk, _) = generate_keypair(&sk).unwrap();
         assert!(verify(&pk, msg, &sig).unwrap());

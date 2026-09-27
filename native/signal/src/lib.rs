@@ -3,6 +3,13 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+// Every export below carries `#[napi(catch_unwind)]`. napi-derive otherwise
+// emits a bare `extern "C"` shim, so a panic anywhere under it unwinds across
+// the FFI boundary and aborts the whole Node process — losing every in-memory
+// session, not just the failing call. The attribute converts the unwind into a
+// JS exception the caller can handle. No export panics today (every `unwrap()`
+// is length-guarded), so this is containment for latent defects rather than a
+// fix for an observed crash.
 pub mod curve;
 pub mod proto;
 pub mod session;
@@ -12,7 +19,7 @@ pub mod ratchet;
 
 // ── curve ──
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn curve_sign(secret_key: Buffer, message: Buffer, random: Option<Buffer>) -> Result<Buffer> {
     let sig = curve::sign(
         secret_key.as_ref(),
@@ -23,20 +30,20 @@ pub fn curve_sign(secret_key: Buffer, message: Buffer, random: Option<Buffer>) -
     Ok(Buffer::from(&sig[..]))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn curve_verify(public_key: Buffer, message: Buffer, signature: Buffer) -> Result<bool> {
     curve::verify(public_key.as_ref(), message.as_ref(), signature.as_ref())
         .map_err(|e| Error::from_reason(e))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn curve_scalar_multiply(secret_key: Buffer, public_key: Buffer) -> Result<Buffer> {
     let result = curve::scalar_multiply(secret_key.as_ref(), public_key.as_ref())
         .map_err(|e| Error::from_reason(e))?;
     Ok(Buffer::from(&result[..]))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn curve_generate_keypair(seed: Buffer) -> Result<Vec<Buffer>> {
     let (pub_key, priv_key) = curve::generate_keypair(seed.as_ref())
         .map_err(|e| Error::from_reason(e))?;
@@ -65,7 +72,7 @@ pub struct PkmsgObj {
     pub signed_pre_key_id: Option<u32>,
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn proto_encode_whisper(
     ephemeral_key: Buffer,
     counter: u32,
@@ -82,7 +89,7 @@ pub fn proto_encode_whisper(
     Ok(Buffer::from(encoded))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn proto_decode_whisper(bytes: Buffer) -> Result<WhisperMessageObj> {
     let msg = proto::decode_whisper(bytes.as_ref()).map_err(|e| Error::from_reason(e))?;
     Ok(WhisperMessageObj {
@@ -93,7 +100,7 @@ pub fn proto_decode_whisper(bytes: Buffer) -> Result<WhisperMessageObj> {
     })
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn proto_encode_pkmsg(json: String) -> Result<Buffer> {
     let msg: proto::PreKeyWhisperMessage = serde_json::from_str(&json)
         .map_err(|e| Error::from_reason(e.to_string()))?;
@@ -101,7 +108,7 @@ pub fn proto_encode_pkmsg(json: String) -> Result<Buffer> {
     Ok(Buffer::from(encoded))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn proto_decode_pkmsg(bytes: Buffer) -> Result<PkmsgObj> {
     let msg = proto::decode_pkmsg(bytes.as_ref()).map_err(|e| Error::from_reason(e))?;
     Ok(PkmsgObj {
@@ -120,20 +127,20 @@ pub fn proto_decode_pkmsg(bytes: Buffer) -> Result<PkmsgObj> {
 // re-serialized. `parse` refuses any field this build does not model, and
 // `validate` refuses a version it does not model, so nothing unrecognized can
 // reach the caller as a record that merely looks well formed.
-#[napi]
+#[napi(catch_unwind)]
 pub fn session_deserialize(json: String) -> Result<String> {
     let record = session::parse(&json).map_err(|e| Error::from_reason(e))?;
     session::validate(&record).map_err(|e| Error::from_reason(e))?;
     session::serialize(&record).map_err(|e| Error::from_reason(e))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn session_serialize(json: String) -> Result<String> {
     let record = session::deserialize(&json).map_err(|e| Error::from_reason(e))?;
     session::serialize(&record).map_err(|e| Error::from_reason(e))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn session_have_open_session(json: String) -> Result<bool> {
     let record = session::deserialize(&json).map_err(|e| Error::from_reason(e))?;
     Ok(session::have_open_session(&record))
@@ -141,7 +148,7 @@ pub fn session_have_open_session(json: String) -> Result<bool> {
 
 // ── x3dh ──
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn x3dh_build_initial_session(
     identity_priv: Buffer,
     identity_pub: Buffer,
@@ -169,7 +176,7 @@ pub fn x3dh_build_initial_session(
     x3dh::build_initial_session(&params).map_err(|e| Error::from_reason(e))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn x3dh_build_recipient_session(
     our_identity_priv: Buffer,
     our_signed_prekey_priv: Buffer,
@@ -206,7 +213,7 @@ pub struct DecryptResultObj {
     pub plaintext: Buffer,
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn ratchet_encrypt(
     session_json: String,
     plaintext: Buffer,
@@ -227,7 +234,7 @@ pub fn ratchet_encrypt(
     })
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn ratchet_decrypt_whisper(
     session_json: String,
     ciphertext: Buffer,
@@ -245,7 +252,7 @@ pub fn ratchet_decrypt_whisper(
     })
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn ratchet_decrypt_pkmsg(
     session_json: String,
     ciphertext: Buffer,

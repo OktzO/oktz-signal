@@ -13,7 +13,7 @@ use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
 use curve25519_dalek::MontgomeryPoint;
 
-use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+use ed25519_dalek::{VerifyingKey, Signature};
 
 use sha2::{Digest, Sha512};
 
@@ -171,7 +171,10 @@ pub fn verify(public_key: &[u8], msg: &[u8], signature: &[u8]) -> Result<bool, S
         Ok(v) => v,
         Err(_) => return Ok(false),
     };
-    Ok(vk.verify(msg, &signature).is_ok())
+    // verify_strict, not verify: the cofactorless equation accepts low-order
+    // keys and low-order R, which lets a forged signature pass. A bundle-supplied
+    // identity key must never be able to authenticate that way.
+    Ok(vk.verify_strict(msg, &signature).is_ok())
 }
 
 // --- X25519 DH (untuk X3DH/double ratchet di signal) ---
@@ -306,6 +309,36 @@ mod tests {
         assert!(generate_keypair(&[0u8; 31]).is_err());
         assert!(scalar_multiply(&[0u8; 31], &[0u8; 32]).is_err());
         assert!(scalar_multiply(&[0u8; 32], &[0u8; 31]).is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_low_order_public_key() {
+        // u = 0 is a low-order Montgomery point; the Edwards point it maps to has
+        // order 2. The cofactorless equation is satisfiable there with a
+        // signature forged without the real key, so the signed-prekey check at
+        // x3dh would accept any bundle naming this public key.
+        let a_point = pubkey_montgomery_to_edwards(&[0u8; 32], 0).unwrap();
+        let a_bytes = a_point.compress().to_bytes();
+        assert!(a_point.is_small_order(), "u=0 must map to a small-order point");
+
+        // R = A with S = 0 satisfies [S]B == R + [h]A whenever h is odd.
+        let mut msg: Vec<u8> = Vec::new();
+        let mut found = false;
+        for i in 0..64u8 {
+            msg = [b"forged prekey bundle".as_slice(), &[i]].concat();
+            if challenge(&a_bytes, &a_bytes, &msg).to_bytes()[0] & 1 == 1 {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected an odd challenge for some probe message");
+
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&a_bytes);
+        assert!(
+            !verify(&[0u8; 32], &msg, &sig).unwrap(),
+            "a low-order public key must never accept a forged signature"
+        );
     }
 
     #[test]

@@ -235,3 +235,36 @@ test('NAPI_RS_FORCE_WASI=error and a resolvable WASI artifact loads the artifact
   });
   assert.ok(attempted.includes('./signal.wasi.cjs'));
 });
+
+// isMuslFromReport() is unreachable from an ordinary test on a glibc host:
+// /usr/bin/ldd answers first and says "glibc". fs.readFileSync is patched
+// before the loader is required, because the loader destructures
+// `readFileSync` off `require('fs')` at module scope, so patching the fs
+// module object beforehand is what actually reaches it.
+const REACH_REPORT_PROBE = `
+  const fs = require('fs')
+  const realReadFileSync = fs.readFileSync
+  let reportRead = 0
+  fs.readFileSync = function (path, ...rest) {
+    if (path === '/usr/bin/ldd') { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e }
+    return realReadFileSync.call(this, path, ...rest)
+  }
+  const getReport = process.report.getReport.bind(process.report)
+  process.report.getReport = function (...rest) { reportRead++; return getReport(...rest) }
+  const before = process.report.excludeNetwork
+  require(${JSON.stringify(loaderPath)})
+  console.log(JSON.stringify({ before, after: process.report.excludeNetwork, reportRead }))
+`;
+
+test('requiring the loader does not leave process.report.excludeNetwork mutated', () => {
+  const output = runLoaderProcess(REACH_REPORT_PROBE, {});
+  const { before, after, reportRead } = JSON.parse(output);
+  assert.equal(reportRead, 1, `the report probe was never reached: ${output}`);
+  assert.equal(after, before, `process.report.excludeNetwork leaked: ${output}`);
+});
+
+test('the report probe restores excludeNetwork to its prior value', () => {
+  const report = { excludeNetwork: undefined, getReport: () => ({ header: { glibcVersionRuntime: '2.39' } }) };
+  runLoader({ lddThrows: true, report });
+  assert.equal(report.excludeNetwork, undefined);
+});

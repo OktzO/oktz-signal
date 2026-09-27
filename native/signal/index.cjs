@@ -37,8 +37,19 @@ const isMuslFromFilesystem = () => {
 const isMuslFromReport = () => {
   let report = null
   if (process.report && typeof process.report.getReport === 'function') {
+    // hand-maintained patch, not emitted by `napi build`: the flag is scoped to
+    // the getReport() call and restored in a finally. Setting it permanently
+    // mutated process-global state on a library `require` -- the flag stuck and
+    // the `network` section vanished from every report the host app emitted
+    // afterwards. getReport() is the only consumer, so the value is restored
+    // even when it throws.
+    const excludeNetwork = process.report.excludeNetwork
     process.report.excludeNetwork = true
-    report = process.report.getReport()
+    try {
+      report = process.report.getReport()
+    } finally {
+      process.report.excludeNetwork = excludeNetwork
+    }
   }
   if (!report) {
     return null

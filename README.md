@@ -4,7 +4,7 @@
 
 ### Signal Protocol native Rust — MIT replacement for `libsignal` (GPL)
 
-[![Version](https://img.shields.io/badge/npm-0.2.0--rc.1-339933?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/oktz-signal)
+[![Version](https://img.shields.io/badge/npm-0.3.0--rc.1-339933?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/oktz-signal)
 [![Node](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
 [![Rust](https://img.shields.io/badge/Rust-native%20napi--rs-red?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Benchmark](https://img.shields.io/benchmark/E2EE%20session%20build%209%C3%97%20vs%20libsignal-9cf?style=for-the-badge)](#-benchmark-vs-libsignal)
@@ -14,7 +14,7 @@
 
 **oktz-signal** adalah implementasi ulang (clean-room) dari Signal Protocol (X3DH + Double Ratchet + session record + protobuf codec) untuk WhatsApp Multi-Device, ditulis dalam **Rust** via **napi-rs** dan dibungkus JS. Dibuat sebagai pengganti `libsignal` (GPL-3.0) yang **license-safe** (MIT).
 
-Wire format dan kriptografi diverifikasi bit-exact terhadap oracle `libsignal` v6 (WhiskeySockets/libsignal-node) lewat test interop dua arah.
+Wire format diverifikasi lewat oracle `libsignal` v6 (WhiskeySockets/libsignal-node) dengan test interop dua arah: `libsignal` encrypt → `oktz-signal` decrypt, dan sebaliknya. **Byte-exactness signature tidak tercapai dan memang tidak bisa dicapai** — nonce XEdDSA sudah diacak demi keamanan, dan `libsignal` v6 tidak menyediakan cara menyamakan nonce. Bukti yang masih berlaku dijelaskan di [Verifikasi kebenaran](#verifikasi-kebenaran-bukan-cuma-cepat).
 
 ---
 
@@ -44,7 +44,18 @@ Wire format dan kriptografi diverifikasi bit-exact terhadap oracle `libsignal` v
 npm install oktz-signal
 ```
 
-Native binary disertakan untuk **`linux-x64-gnu`** (`signal.linux-x64-gnu.node`). Build dari source untuk platform lain:
+Binary native **tidak disertakan di dalam package `oktz-signal`** — package utama hanya berisi loader + wrapper JS. Yang dipublish adalah 4 platform package terpisah, terpasang otomatis sebagai `optionalDependencies`:
+
+| Platform package | Target |
+|---|---|
+| `@oktz-signal/signal-linux-x64-gnu` | `x86_64-unknown-linux-gnu` |
+| `@oktz-signal/signal-linux-x64-musl` | `x86_64-unknown-linux-musl` (Alpine) |
+| `@oktz-signal/signal-linux-arm64-gnu` | `aarch64-unknown-linux-gnu` |
+| `@oktz-signal/signal-linux-arm64-musl` | `aarch64-unknown-linux-musl` |
+
+> ⚠️ **Android / Termux tidak punya prebuilt.** Binary `aarch64-linux-android` masih di-cross-compile di CI sebagai artifact, tapi **sengaja tidak dipublish** dan sudah dihapus dari `optionalDependencies` — `npm install` di Termux tidak akan mendapatkan `.node` dan harus build dari source. Alasannya, artifact itu belum pernah benar-benar di-load di runtime Android, jadi mempubliskannya tanpa bukti.
+
+Untuk platform lain, build dari source:
 
 ```bash
 npm run build:native   # butuh Rust + gcc (nix-shell -p gcc)
@@ -57,7 +68,7 @@ Prasyarat per target:
 - **Linux x64 musl (Alpine)**: Rust stable + `musl-gcc` + **Zig** (cross-compile via `zig cc`)
 - **Linux ARM64 GNU**: Rust stable + `aarch64-linux-gnu-gcc` + **Zig** (cross-compile via `zig cc`)
 - **Linux ARM64 musl (Alpine)**: Rust stable + **Zig** (cross-compile via `zig cc`)
-- **Android ARM64 (Termux)**: Rust stable + **Android NDK** + `rustup target add aarch64-linux-android`
+- **Android ARM64 (Termux)** — *tidak dipublish, build sendiri*: Rust stable + **Android NDK** + `rustup target add aarch64-linux-android`
 
 Commands (dijalankan dari root repo `oktz-signal`):
 
@@ -92,13 +103,9 @@ Setelah install (via npm atau build lokal), verifikasi native module load:
 # Verifikasi native API tersedia
 node -e "import('oktz-signal').then(({ native }) => console.log(typeof native.ratchetEncrypt))"
 # Output: function
-
-# Verifikasi curve25519 (dependency terpisah)
-node -e "console.log(typeof require('oktz-curve25519').sign)"
-# Output: function
 ```
 
-Kedua command harus mengeluarkan `function`. Jika error/undefined, native binary tidak cocok platform atau gagal load.
+Command tersebut harus mengeluarkan `function`. Jika error/undefined, native binary tidak cocok platform atau gagal load — `oktz-signal` tidak punya dependency runtime sama sekali, jadi apa pun yang gagal di sini adalah masalah load `.node`, bukan dependency yang kurang.
 
 ## Penggunaan
 
@@ -130,7 +137,7 @@ node --test tests/oracle/interop.test.mjs  # oracle vs libsignal (butuh libsigna
 
 ## ⏱️ Benchmark vs libsignal
 
-Diukur pada Node v20.19.1, Linux x64, in-process loop, kunci acak per iterasi (bukan kunci deterministik). Script benchmark tersedia di repo test suite dan bisa direproduksi langsung.
+Diukur pada Node v20.19.1, Linux x64, in-process loop, kunci acak per iterasi (bukan kunci deterministik). **Angka di bawah adalah hasil pengukuran yang tercatat, bukan output yang bisa direproduksi dari repo ini — tidak ada script benchmark di test suite maupun di `package.json`.** Perlakukan sebagai indikasi urutan besaran, bukan benchmark yang bisa dijalankan ulang.
 
 ### 1. Sesi penuh (X3DH + PKMsg encrypt + decrypt)
 
@@ -152,7 +159,7 @@ Session sudah ter-establish, satu pesan bolak-balik (ratchet step + AES-256-CBC 
 
 \* Rentang antar-run; raw native call tanpa wrapper JS = **278 µs** — wrapper (QueueJob + serialize + JSON.parse) menambah ±110 µs/op. Ini target optimasi berikutnya (lihat [Audit](#-audit-internal--known-limitations)).
 
-### 3. Crypto primitive (via `oktz-curve25519` / `curve.rs`)
+### 3. Crypto primitive (Rust native, `curve.rs`)
 
 | Operasi | oktz-signal (Rust) | libsignal (JS) | Speedup |
 |---|---:|---:|---:|
@@ -162,10 +169,21 @@ Session sudah ter-establish, satu pesan bolak-balik (ratchet step + AES-256-CBC 
 
 ### Verifikasi kebenaran (bukan cuma cepat)
 
-- ✅ **Oracle interop 2-arah** vs libsignal v6 — wire format bit-exact (X25519 RFC 7748 KAT, XEdDSA, layout shared secret, info strings, message key derivation, AES-CBC+MAC, protobuf WhisperMessage/PKMsg, format session record).
-- ✅ **Out-of-order delivery**: pesan diterima terbalik (#3 → #2 → #1) semuanya ter-decrypt benar (skipped-message keys bekerja).
-- ✅ **Replay & reuse session by baseKey** — pesan PKMsg kedua dengan baseKey sama tidak memicu rebuild session (fix 0.1.7 terverifikasi).
-- ✅ **pendingPreKey semantics** — pesan type-3 persist sampai recipient membalas, **match perilaku libsignal** (diverifikasi side-by-side).
+Yang benar-benar ada di test suite hari ini:
+
+- ✅ **Oracle interop 2-arah** vs `libsignal` v6 (`tests/oracle/interop.test.mjs`) — `libsignal` encrypt → `oktz-signal` decrypt **dan** sebaliknya, plus session record `libsignal` → `oktz-signal` deserialize. Ini pembuktian perilaku end-to-end atas wire format, bukan perbandingan byte.
+- ✅ **Public key derivation byte-identical** dengan `libsignal`, dan **signature cross-verified 2-arah pada 100 kasus acak** — `libsignal` memverifikasi signature oktz, oktz memverifikasi signature `libsignal`.
+- ✅ **Known-answer vectors** (Rust, vektor eksternal — bukan self-consistency): X25519 RFC 7748 §5.2 (`curve.rs`), XEdDSA dengan vektor dari curve25519-js pada jalur `rnd` (`curve.rs`), dan byte protobuf `WhisperMessage`/`PreKeyWhisperMessage` (`proto.rs`).
+- ✅ **Tamper & forgery** — MAC rusak ditolak, dan receiving chain yang dikosongkan oleh ratchet step tidak bisa dipakai untuk decrypt forged message.
+- ✅ **Skipped-message keys** — enkripsi/decrypt multi-pesan dengan chain stepping, plus cap 2000 message yang diuji (`ratchet.rs`).
+
+Yang **tidak** terverifikasi, dan sebaiknya tidak diklaim sebagai ✅:
+
+- ❌ **Byte-exactness signature XEdDSA — tidak tercapai dan tidak bisa dicapai.** `libsignal@6.0.0` `curve.calculateSignature(privKey, message)` ber-arity 2 dan hard-code `curve25519-js`'s `crypto_sign_direct`, jadi nonce tidak bisa di-inject dari sisi mana pun. Sejak nonce diacak (RFC 8032 hashed random prefix supaya identity key tidak bisa direcover dari dua chosen-message signature), kedua engine memang memilih nonce berbeda. Bukti yang lebih kuat menggantikannya: pubkey byte-exact + cross-verification 2-arah 100 kasus + KAT di jalur `rnd`.
+- ❌ **Out-of-order delivery #3 → #2 → #1** — tidak ada test yang mengalamatkan pesan terbalik. `ratchet.rs` mengimplementasikan skipped-message keys, tapi perilakunya belum dibuktikan test. Jangan anggap backlog terverifikasi.
+- ❌ **KAT terpisah untuk layout shared secret, info string, message key derivation, dan AES-CBC+MAC** — tidak ada. Aspek-aspek itu hanya tercakup secara tidak langsung lewat interop end-to-end di atas.
+- ⚠️ **Replay & reuse session by baseKey** — jalur kodenya ada (`sessionHasBaseKey` di `session-cipher.js`: pesan PKMsg dengan baseKey yang sudah ada tidak memicu rebuild), dan secara tidak langsung teruji lewat test archive/queue. Tapi **tidak ada test yang mengirim PKMsg kedua dengan baseKey sama lalu assert tidak ada rebuild** — jadi klaim ini belum layak dianggap "terverifikasi".
+- ✅ **pendingPreKey semantics** — pesan type-3 dibungkus ulang ke type-3 sampai recipient membalas, lalu `entry.pendingPreKey` dihapus saat decrypt (`ratchet.rs`). Perilaku ini ter-cover end-to-end oleh test wrapper (`initOutgoing → encrypt type 3 → initIncoming → decrypt → reply`), tetapi **tidak** ada pembandingan side-by-side dengan `libsignal` — jangan sebut match libsignal sebagai hal yang terbukti.
 
 ---
 
@@ -197,9 +215,18 @@ Audit baris-per-baris penuh (Rust + JS + binding napi) — September 2026. Ringk
 
 - **Sender Key / group E2EE** tidak diimplementasi — hanya X3DH + Double Ratchet 1:1. Consumer multi-device group (baileys fork) perlu implementasi SenderKey sendiri atau konsumen bertanggung jawab.
 
-### Dead code & dependency (dihapus di rilis berikutnya)
+### Dead code & dependency
 
-`block-modes` + `hkdf` crates (orphan, tidak pernah dipakai), `napi features = ["full"]` overkill, duplikat binary `.node` 1MB di root repo, `src/crypto.js` (re-implementasi JS dari yang sudah ada di Rust).
+- ~~`block-modes` + `hkdf` crates~~ — **sudah dihapus** dari `Cargo.toml`.
+- ~~Duplikat binary `.node` 1MB di root repo~~ — **sudah dihapus**; repo tidak lagi melacak `.node` apa pun.
+- **`napi features = ["full"]`** — masih ada di `Cargo.toml` dan memang overkill, belum dibersihkan.
+- **`src/crypto.js`** — **bukan dead code dan tidak akan dihapus.** Lihat catatan di bawah.
+
+### Catatan API: `crypto.encrypt` / `crypto.decrypt`
+
+`src/crypto.js` shipped di dalam package (`files: ["src/"]`), diekspor sebagai `crypto` dari `index.js`, dan punya test sendiri di `tests/wrapper.test.mjs`. Ekspor ini tidak dihapus — menghapusnya adalah perubahan API publik yang merusak consumer yang memakainya.
+
+> ⚠️ **`crypto.encrypt` / `crypto.decrypt` bukan primitive keamanan.** Keduanya `createCipheriv('aes-256-cbc', ...)` murni: **tanpa autentikasi, tanpa MAC**. Plaintext bisa dimodifikasi bitwise oleh penyerang dan padding bisa diubah tanpa terdeteksi — ini kelemahan klasik CBC. Jangan pakai sebagai primitive keamanan. Untuk pesan yang butuh jaminan integritas, pakai `SessionCipher` (yang memakai MAC 8-byte ter-truncate). `crypto.*` hanya berguna untuk pembungkus data non-protokol, dan hanya bila kerahasiaan lebih penting daripada integritas. `crypto.deriveSecrets` dan `crypto.verifyMAC` tidak punya masalah ini.
 
 ---
 

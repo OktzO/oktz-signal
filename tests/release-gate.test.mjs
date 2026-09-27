@@ -90,3 +90,53 @@ test('no workflow runs node --test with a positional path or glob', () => {
     }
   }
 });
+
+const ciMatrix = () => parse('ci.yml').jobs.build.strategy.matrix.include;
+const stepIndex = (job, pattern) => steps(job).findIndex((s) => pattern.test(s.run ?? ''));
+// The build step's `run` is literally `${{ matrix.command }}`, so the napi
+// invocation only appears in the matrix, not in the step.
+const BUILD = /napi build|matrix\.command/;
+const CARGO_TEST = /cargo test/;
+
+test('ci.yml runs the Rust test suite', () => {
+  const build = parse('ci.yml').jobs.build;
+  assert.notEqual(stepIndex(build, CARGO_TEST), -1,
+    'ci.yml must run `cargo test`; all 39 Rust #[test] fns are currently executed by nothing');
+});
+
+test('ci.yml runs the Rust test suite on every platform job, not one target', () => {
+  const build = parse('ci.yml').jobs.build;
+  const runners = steps(build).filter((s) => CARGO_TEST.test(s.run ?? ''));
+  assert.notDeepEqual(runners, [], 'ci.yml must run `cargo test`');
+  for (const step of runners) {
+    assert.ok(!/matrix\.target|matrix\.package/.test(step.if ?? ''),
+      `the cargo test step is gated on \`${step.if}\`, so it runs on one platform only`);
+  }
+});
+
+test('ci.yml runs the Rust test suite before building the platform binary', () => {
+  const build = parse('ci.yml').jobs.build;
+  const test = stepIndex(build, CARGO_TEST);
+  const buildStep = stepIndex(build, BUILD);
+  assert.notEqual(buildStep, -1, 'ci.yml must still build the platform binary');
+  assert.ok(test !== -1 && test < buildStep,
+    `cargo test runs at step ${test}, the build at step ${buildStep}; a broken toolchain should fail before the build`);
+});
+
+test('ci.yml labels no platform compile-only', () => {
+  assert.ok(!source('ci.yml').includes('compile-only'),
+    'ci.yml must not call a platform `compile-only`: every job now runs the Rust suite');
+});
+
+test('ci.yml claims a binary was loaded only for a target the runner can actually load', () => {
+  const build = parse('ci.yml').jobs.build;
+  const loaders = steps(build).filter((s) => /npm (run )?test/.test(s.run ?? ''));
+  assert.notDeepEqual(loaders, [], 'ci.yml must load at least one built binary');
+  const selected = loaders.map((s) => s.if ?? '').join('\n');
+
+  for (const { target, status } of ciMatrix()) {
+    if (!/binary-loaded|runtime-tested/.test(status ?? '')) continue;
+    assert.match(selected, new RegExp(`${target}|'\\*'`),
+      `ci.yml labels ${target} \`${status}\` but no step that loads a binary selects it`);
+  }
+});

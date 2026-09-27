@@ -21,23 +21,23 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             package: linux-x64-gnu
-            status: runtime-tested
+            status: rust-tested+binary-loaded
             command: npm exec -- napi build --release --target x86_64-unknown-linux-gnu --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
           - target: x86_64-unknown-linux-musl
             package: linux-x64-musl
-            status: compile-only
+            status: rust-tested
             command: npm exec -- napi build --release --target x86_64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
           - target: aarch64-unknown-linux-gnu
             package: linux-arm64-gnu
-            status: compile-only
+            status: rust-tested
             command: npm exec -- napi build --release --target aarch64-unknown-linux-gnu --use-napi-cross --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
           - target: aarch64-unknown-linux-musl
             package: linux-arm64-musl
-            status: compile-only
+            status: rust-tested
             command: npm exec -- napi build --release --target aarch64-unknown-linux-musl --cross-compile --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
           - target: aarch64-linux-android
             package: android-arm64
-            status: compile-only
+            status: rust-tested
             command: npm exec -- napi build --release --target aarch64-linux-android --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs
     steps:
       - uses: actions/checkout@v4
@@ -50,11 +50,13 @@ jobs:
         with:
           tool: zig
       - run: npm ci
+      - name: Run the Rust test suite
+        run: cargo test --locked --manifest-path native/signal/Cargo.toml
       - name: Build platform package
         run: ${{ matrix.command }}
       - name: Create npm artifact
         run: npm exec -- napi artifacts --config-path napi.config.json --output-dir native/signal --npm-dir npm
-      - name: Test runnable Linux x64 GNU build
+      - name: Load the Linux x64 GNU build and run the JS suite
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           npm test

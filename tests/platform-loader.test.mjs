@@ -52,6 +52,7 @@ const loaderSource = readFileSync(join(root, 'native', 'signal', 'index.cjs'), '
 function runLoader({
   arch = 'x64', ldd = 'musl libc.so', lddThrows = false, report = null,
   lddVersion = 'musl libc', lddVersionThrows = false, env = {}, provides = {},
+  throwsFor = {},
 } = {}) {
   const attempted = [];
   const execSyncCalls = [];
@@ -62,6 +63,7 @@ function runLoader({
     return error;
   };
   const has = (specifier) => Object.prototype.hasOwnProperty.call(provides, specifier);
+  const fails = (specifier) => Object.prototype.hasOwnProperty.call(throwsFor, specifier);
   const requireFrom = (specifier) => {
     attempted.push(specifier);
     if (specifier === 'fs') {
@@ -84,10 +86,11 @@ function runLoader({
       };
     }
     if (has(specifier)) return provides[specifier];
+    if (fails(specifier)) throw throwsFor[specifier];
     throw notFound(specifier);
   };
   requireFrom.resolve = (specifier) => {
-    if (has(specifier)) return specifier;
+    if (has(specifier) || fails(specifier)) return specifier;
     throw notFound(specifier);
   };
 
@@ -184,4 +187,51 @@ test('a failed NAPI_RS_NATIVE_LIBRARY_PATH override is reported by name in the c
     chain.some((message) => message.includes('NAPI_RS_NATIVE_LIBRARY_PATH')),
     `override failure not named in chain: ${JSON.stringify(chain)}`,
   );
+});
+
+const DLOPEN_FAILURE = new Error('dlopen: cannot open shared object file: No such file or directory');
+
+// The shape of a real host failure: npm installed the optional platform
+// package, but the addon itself will not load. The local artifact is simply
+// absent, so its MODULE_NOT_FOUND is the innermost cause and the dlopen
+// failure is the one worth reading.
+const INSTALLED_BUT_UNLOADABLE = {
+  throwsFor: { '@oktz-signal/signal-linux-x64-musl': DLOPEN_FAILURE },
+  provides: { '@oktz-signal/signal-linux-x64-musl/package.json': { version: '0.3.0-rc.1' } },
+};
+
+test('the real native failure is the outermost cause, not an absent WASI package', () => {
+  const { chain } = runLoader(INSTALLED_BUT_UNLOADABLE);
+  assert.equal(chain[1], DLOPEN_FAILURE.message);
+});
+
+test('absent WASI candidates are not reported as load failures', () => {
+  const { chain } = runLoader(INSTALLED_BUT_UNLOADABLE);
+  assert.ok(
+    !chain.some((message) => /signal\.wasi\.cjs|@oktz-signal\/signal-wasm32-wasi/.test(message)),
+    `absent WASI candidate leaked into the load chain: ${JSON.stringify(chain)}`,
+  );
+});
+
+test('the npm optional-dependency advice is not printed over a non-resolution failure', () => {
+  const { thrown } = runLoader(INSTALLED_BUT_UNLOADABLE);
+  assert.ok(!thrown.message.includes('npm has a bug related to optional dependencies'), thrown.message);
+});
+
+test('NAPI_RS_FORCE_WASI=error still reports the WASI candidates it looked for', () => {
+  const { thrown, chain } = runLoader({ env: { NAPI_RS_FORCE_WASI: 'error' } });
+  assert.equal(thrown.message, 'WASI binding not found and NAPI_RS_FORCE_WASI is set to error');
+  assert.ok(chain.some((message) => /@oktz-signal\/signal-wasm32-wasi/.test(message)), JSON.stringify(chain));
+});
+
+test('NAPI_RS_FORCE_WASI=error and a resolvable WASI artifact loads the artifact', () => {
+  const { attempted } = runLoader({
+    env: { NAPI_RS_FORCE_WASI: 'error' },
+    ldd: 'ldd (GNU libc) 2.39',
+    provides: {
+      './signal.wasi.cjs': { curveSign() {} },
+      './signal.wasm32-wasi.wasm': '',
+    },
+  });
+  assert.ok(attempted.includes('./signal.wasi.cjs'));
 });

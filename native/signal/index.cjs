@@ -637,6 +637,14 @@ if (!nativeBinding || forceWasi) {
     }
     return null
   }
+  // hand-maintained patch, not emitted by `napi build`: an absent WASI
+  // candidate is a missing optional artifact, not a load failure, so both
+  // candidates below record into `wasiBindingErrors` only. `napi.config.json`
+  // ships no wasm target, so both are unresolved on every install; pushing them
+  // into `loadErrors` put a MODULE_NOT_FOUND at the head of the cause chain and
+  // made a real native failure surface as the misleading "npm has a bug related
+  // to optional dependencies" advice. The explicit WASI error path below still
+  // reports them, through `wasiBindingErrors`.
   if (!wasiBindingLoaded && (!__napiWasiFlavorRequested || __napiWasiFlavor === 'wasm32-wasi')) {
     let candidateError = null
     let candidateFailed = false
@@ -655,7 +663,6 @@ if (!nativeBinding || forceWasi) {
     }
     if (candidateFailed) {
       wasiBindingErrors.push(candidateError)
-      loadErrors.push(candidateError)
     }
   }
   if (!wasiBindingLoaded && (!__napiWasiFlavorRequested || __napiWasiFlavor === 'wasm32-wasi')) {
@@ -682,7 +689,6 @@ if (!nativeBinding || forceWasi) {
     }
     if (candidateFailed) {
       wasiBindingErrors.push(candidateError)
-      loadErrors.push(candidateError)
     }
   }
   if (
@@ -706,10 +712,18 @@ if (!nativeBinding || forceWasi) {
 
 if (!nativeBinding) {
   if (loadErrors.length > 0) {
+    // hand-maintained patch, not emitted by `napi build`: "npm has a bug
+    // related to optional dependencies" is only actionable advice when the
+    // candidates genuinely failed to resolve. Printed over a dlopen or
+    // corruption failure it sends the reader after a reinstall that cannot
+    // help, so it is now gated on the errors it actually applies to.
+    const unresolvedOnly = loadErrors.every((e) => e && e.code === 'MODULE_NOT_FOUND')
     const error = new Error(
       `Cannot find native binding. ` +
-        `npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). ` +
-        'Please try `npm i` again after removing both package-lock.json and node_modules directory.',
+        (unresolvedOnly
+          ? `npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). ` +
+            'Please try `npm i` again after removing both package-lock.json and node_modules directory.'
+          : 'The binding candidates below exist but failed to load. See the cause chain for the real error.'),
     )
     // assign instead of the `new Error(message, { cause })` options form,
     // which Node < 16.9 silently ignores

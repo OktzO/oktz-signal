@@ -119,9 +119,11 @@ export class SessionCipher {
       } catch (e) { mapNativeError(e); }
       await this.storage.storeSession(addrKey, new SessionRecord(result.sessionJson));
       // One-time prekey is consumed (libsignal removes it after successful
-      // initIncoming to prevent pkmsg replay from reusing the OPK).
+      // initIncoming to prevent pkmsg replay from reusing the OPK). A failure
+      // here is NOT best-effort: the caller must learn the prekey is still on
+      // disk and replayable rather than assume it was consumed.
       if (built && pkmsg.preKeyId != null && this.storage.removePreKey) {
-        try { await this.storage.removePreKey(pkmsg.preKeyId) } catch { /* best-effort */ }
+        await this.storage.removePreKey(pkmsg.preKeyId);
       }
       return result.plaintext;
     });
@@ -130,16 +132,14 @@ export class SessionCipher {
 
 // Does the stored SessionRecord already hold an entry whose baseKey matches
 // `baseKeyB64`? Mirrors libsignal SessionRecord.getSession(baseKey) lookup.
+// An unparseable record must throw: answering "no" would answer corruption with
+// a fresh X3DH build and a burned one-time prekey.
 function sessionHasBaseKey(session, baseKeyB64) {
-  try {
-    const record = JSON.parse(session.serialize());
-    const entries = record._sessions || {};
-    return Object.values(entries).some(
-      (e) => e.indexInfo && e.indexInfo.baseKey === baseKeyB64
-    );
-  } catch {
-    return false;
-  }
+  const record = JSON.parse(session.serialize());
+  const entries = record._sessions || {};
+  return Object.values(entries).some(
+    (e) => e.indexInfo && e.indexInfo.baseKey === baseKeyB64
+  );
 }
 
 // Archive the existing open session(s) and merge the freshly-built entry into

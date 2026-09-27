@@ -1,8 +1,7 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const native = require('../native/signal/index.cjs');
-import { QueueJob } from './queue-job.js';
-import { SessionRecord } from './session-record.js';
+import { SessionRecord, sharedQueue } from './session-record.js';
 import { NoSessionError } from './errors.js';
 import { SessionBuilder } from './session-builder.js';
 
@@ -30,16 +29,7 @@ function mapNativeError(e) {
   throw e;
 }
 
-// Queues are shared per (storage, addr) so two SessionCipher instances over
-// the same record can't interleave load/store and duplicate ratchet counters.
-const QUEUE_INDEX = new WeakMap(); // storage -> Map<addrKey, QueueJob>
-function sharedQueue(storage, addrKey) {
-  let byAddr = QUEUE_INDEX.get(storage);
-  if (!byAddr) QUEUE_INDEX.set(storage, (byAddr = new Map()));
-  let q = byAddr.get(addrKey);
-  if (!q) byAddr.set(addrKey, (q = new QueueJob()));
-  return q;
-}
+// Queues are shared per (storage, addr); see sharedQueue in session-record.js.
 
 export class SessionCipher {
   constructor(storage, addr) {

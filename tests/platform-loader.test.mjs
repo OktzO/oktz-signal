@@ -302,3 +302,45 @@ test('a failing libc probe does not write to the parent process stderr', () => {
     rmSync(bin, { force: true, recursive: true });
   }
 });
+
+const STALE_PLATFORM_PACKAGE = {
+  ldd: 'ldd (GNU libc) 2.39',
+  provides: {
+    '@oktz-signal/signal-linux-x64-gnu': { curveSign() {} },
+    '@oktz-signal/signal-linux-x64-gnu/package.json': { version: '0.1.0' },
+  },
+};
+
+test('a version-mismatched platform package is rejected without opting in', () => {
+  const { thrown } = runLoader({ ...STALE_PLATFORM_PACKAGE, env: {} });
+  assert.match(thrown.message, /version mismatch, expected 0\.3\.0-rc\.1 but got 0\.1\.0/);
+});
+
+test('a version-mismatched platform package reports the version error, not MODULE_NOT_FOUND', () => {
+  const { thrown } = runLoader({ ...STALE_PLATFORM_PACKAGE, env: {} });
+  assert.ok(
+    !/Cannot find module/.test(thrown.message),
+    `the version error was re-buried: ${thrown.message}`,
+  );
+  assert.ok(
+    !(thrown.cause && /Cannot find module/.test(thrown.cause.message)),
+    `the version error was re-buried under a resolution failure: ${thrown.cause && thrown.cause.message}`,
+  );
+});
+
+test('a version-mismatched platform package is still rejected when enforcement is requested', () => {
+  const { thrown } = runLoader({ ...STALE_PLATFORM_PACKAGE, env: { NAPI_RS_ENFORCE_VERSION_CHECK: '1' } });
+  assert.match(thrown.message, /version mismatch, expected 0\.3\.0-rc\.1 but got 0\.1\.0/);
+});
+
+test('a matching platform package loads', () => {
+  const { thrown } = runLoader({
+    ldd: 'ldd (GNU libc) 2.39',
+    provides: {
+      '@oktz-signal/signal-linux-x64-gnu': { curveSign() {} },
+      '@oktz-signal/signal-linux-x64-gnu/package.json': { version: '0.3.0-rc.1' },
+    },
+    env: {},
+  });
+  assert.equal(thrown, null);
+});

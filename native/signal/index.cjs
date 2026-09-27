@@ -77,9 +77,15 @@ function requireNative() {
           : 'native'
       return overrideBinding
     } catch (err) {
-      loadErrors.push(err)
+      loadErrors.push(new Error(`NAPI_RS_NATIVE_LIBRARY_PATH could not be loaded: ${err && err.message ? err.message : String(err)}`))
     }
-  } else if (process.platform === 'android') {
+  }
+  // hand-maintained patch, not emitted by `napi build`: an override is an
+  // override, not a replacement. As the head of this if/else chain a bad
+  // NAPI_RS_NATIVE_LIBRARY_PATH disabled every platform fallback below and
+  // broke a working install; the override is now a standalone step, and its
+  // failure is recorded above by name so it stays findable in the cause chain.
+  if (process.platform === 'android') {
     if (process.arch === 'arm64') {
       try {
         return require('./signal.android-arm64.node')

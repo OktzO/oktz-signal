@@ -110,6 +110,12 @@ fn fill_message_keys(chain: &mut Chain, counter: i64) -> Result<(), String> {
     if counter <= chain.chainKey.counter {
         return Ok(());
     }
+    // A retired chain is stored with an empty key. Deriving from it would mean
+    // HMAC under an empty key — public knowledge — so a forgery would pass the
+    // real MAC. Fail closed instead.
+    if chain.chainKey.key.is_empty() {
+        return Err("receiving chain is closed".to_string());
+    }
     if counter - chain.chainKey.counter > 2000 {
         return Err("Over 2000 messages into the future!".to_string());
     }
@@ -142,12 +148,14 @@ pub(crate) fn maybe_step_ratchet(
     let remote_key = crate::util::unb64(remote_key_b64)?;
 
     // 1. Close previous receiving chain (keyed by lastRemoteEphemeralKey).
+    // libsignal removes the chain outright (session_chains.remove); the keys it
+    // derives to reach previousCounter are discarded with it — once a ratchet
+    // step happens, messages still pending on the old chain are unrecoverable.
     if !entry.currentRatchet.lastRemoteEphemeralKey.is_empty() {
         let prev_b64 = entry.currentRatchet.lastRemoteEphemeralKey.clone();
-        if let Some(prev_chain) = entry.chains.get_mut(&prev_b64) {
+        if let Some(mut prev_chain) = entry.chains.remove(&prev_b64) {
             if prev_chain.chainType == 0 {
-                fill_message_keys(prev_chain, previous_counter as i64)?;
-                prev_chain.chainKey.key = String::new(); // closed
+                fill_message_keys(&mut prev_chain, previous_counter as i64)?;
             }
         }
     }
@@ -531,6 +539,46 @@ mod tests {
         };
         record.sessions.insert("bob-session".to_string(), entry);
         session::serialize(&record).unwrap()
+    }
+
+    #[test]
+    fn closed_receiving_chain_is_rejected() {
+        // A chain emptied by a DH ratchet step must not remain usable.
+        let mut chain = Chain {
+            chainKey: ChainKey {
+                counter: 0,
+                key: String::new(),
+            },
+            chainType: 0,
+            messageKeys: BTreeMap::new(),
+        };
+        assert!(
+            fill_message_keys(&mut chain, 2).is_err(),
+            "an empty chain key must never derive message keys"
+        );
+    }
+
+    #[test]
+    fn ratchet_step_removes_retired_receiving_chain() {
+        // libsignal's maybeStepRatchet does session_chains.remove(prevKey):
+        // the retired chain must not survive the step, because its derived
+        // skipped keys are discarded anyway.
+        let (_, bob, _, _) = build_pair();
+        let mut record: SessionRecord = session::deserialize(&bob).unwrap();
+        let entry = record.sessions.values_mut().next().unwrap();
+        let prev_recv_key = entry.currentRatchet.lastRemoteEphemeralKey.clone();
+        assert!(
+            entry.chains.contains_key(&prev_recv_key),
+            "fixture must start with the retired receiving chain present"
+        );
+
+        let (remote_pub, _) = curve::generate_keypair(&[0x9Au8; 32]).unwrap();
+        maybe_step_ratchet(entry, &crate::util::b64(&remote_pub), 0).unwrap();
+
+        assert!(
+            !entry.chains.contains_key(&prev_recv_key),
+            "retired receiving chain must be removed, not left with an empty key"
+        );
     }
 
     #[test]

@@ -7,3 +7,4 @@ node_modules/
 
 # build artifact of the loader guard (build:native writes here, build:loader patches index.cjs)
 native/signal/index.cjs.generated
+native/signal/index.d.ts

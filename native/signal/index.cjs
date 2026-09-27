@@ -10,6 +10,7 @@ let nativeBinding = null
 let __napiLoadedBindingTarget = 'native'
 const loadErrors = []
 
+/* oktz-signal:hand-maintained:begin version-check-helpers */
 // hand-maintained patch, not emitted by `napi build`. Every binding version
 // check below was gated on NAPI_RS_ENFORCE_VERSION_CHECK, which is unset by
 // default: a platform package left behind by an earlier install loaded in
@@ -31,6 +32,7 @@ const __napiPushLoadError = (e) => {
   if (e && e.code === 'ERR_NAPI_BINDING_VERSION_MISMATCH') throw e
   loadErrors.push(e)
 }
+/* oktz-signal:hand-maintained:end version-check-helpers */
 
 const isMusl = () => {
   let musl = false
@@ -59,6 +61,7 @@ const isMuslFromFilesystem = () => {
 const isMuslFromReport = () => {
   let report = null
   if (process.report && typeof process.report.getReport === 'function') {
+    /* oktz-signal:hand-maintained:begin musl-report-scoping */
     // hand-maintained patch, not emitted by `napi build`: the flag is scoped to
     // the getReport() call and restored in a finally. Setting it permanently
     // mutated process-global state on a library `require` -- the flag stuck and
@@ -72,6 +75,7 @@ const isMuslFromReport = () => {
     } finally {
       process.report.excludeNetwork = excludeNetwork
     }
+    /* oktz-signal:hand-maintained:end musl-report-scoping */
   }
   if (!report) {
     return null
@@ -89,17 +93,27 @@ const isMuslFromReport = () => {
 
 const isMuslFromChildProcess = () => {
   try {
+    /* oktz-signal:hand-maintained:begin musl-probe-stdio */
     // hand-maintained patch, not emitted by `napi build`: stdin and stderr are
     // discarded. execSync's default stdio inherits them from this process, so
     // a failed probe printed the shell's own diagnostics into the host
     // application's stderr -- noise attributed to the host, from a probe whose
     // only output of interest is the stdout captured below.
     return require('child_process').execSync('ldd --version', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).includes('musl')
+    /* oktz-signal:hand-maintained:end musl-probe-stdio */
   } catch (e) {
     // If we reach this case, we don't know if the system is musl or not, so is better to just fallback to false
     return false
   }
 }
+
+/* oktz-signal:hand-maintained:begin version-check-sites */
+// hand-maintained patch, not emitted by `napi build`: the two edits above
+// reach every candidate catch and every version check in this file. Those 78
+// sites are scattered through the generated dispatch chain rather than sitting
+// in one block, so they cannot be bracketed by these markers; `verify` pins
+// their exact counts (26 version checks, 52 load-error records) instead.
+/* oktz-signal:hand-maintained:end version-check-sites */
 
 function requireNative() {
   if (process.env.NAPI_RS_NATIVE_LIBRARY_PATH) {
@@ -115,7 +129,12 @@ function requireNative() {
           : 'native'
       return overrideBinding
     } catch (err) {
+      /* oktz-signal:hand-maintained:begin override-fallback */
+      // hand-maintained patch, not emitted by `napi build`: a failed override is
+      // recorded by name, so the operator who set the variable can find it in
+      // the cause chain instead of it surfacing as a bare resolution failure.
       loadErrors.push(new Error(`NAPI_RS_NATIVE_LIBRARY_PATH could not be loaded: ${err && err.message ? err.message : String(err)}`))
+      /* oktz-signal:hand-maintained:end override-fallback */
     }
   }
   // hand-maintained patch, not emitted by `napi build`: an override is an
@@ -675,6 +694,7 @@ if (!nativeBinding || forceWasi) {
     }
     return null
   }
+  /* oktz-signal:hand-maintained:begin wasi-candidate-errors */
   // hand-maintained patch, not emitted by `napi build`: an absent WASI
   // candidate is a missing optional artifact, not a load failure, so both
   // candidates below record into `wasiBindingErrors` only. `napi.config.json`
@@ -683,6 +703,7 @@ if (!nativeBinding || forceWasi) {
   // made a real native failure surface as the misleading "npm has a bug related
   // to optional dependencies" advice. The explicit WASI error path below still
   // reports them, through `wasiBindingErrors`.
+  /* oktz-signal:hand-maintained:end wasi-candidate-errors */
   if (!wasiBindingLoaded && (!__napiWasiFlavorRequested || __napiWasiFlavor === 'wasm32-wasi')) {
     let candidateError = null
     let candidateFailed = false
@@ -710,12 +731,18 @@ if (!nativeBinding || forceWasi) {
       candidateError = __napiWasiResolveCandidate('@oktz-signal/signal-wasm32-wasi', true, undefined)
       candidateFailed = candidateError !== null
       if (!candidateFailed) {
+        /* oktz-signal:hand-maintained:begin wasi-version-check */
+        // hand-maintained patch, not emitted by `napi build`: the WASI package
+        // was gated on the same opt-in flag as every native platform package,
+        // and is enforced identically. Leaving one opt-in site would have
+        // meant a stale WASI package still loading silently.
         {
           const bindingPackageVersion = require('@oktz-signal/signal-wasm32-wasi/package.json').version
           if (__napiBindingVersionIsStale(bindingPackageVersion)) {
             throw __napiBindingVersionMismatch(bindingPackageVersion, 'WASI')
           }
         }
+        /* oktz-signal:hand-maintained:end wasi-version-check */
         wasiBinding = require('@oktz-signal/signal-wasm32-wasi')
         nativeBinding = wasiBinding
         __napiLoadedBindingTarget = 'wasm32-wasi'
@@ -750,12 +777,14 @@ if (!nativeBinding || forceWasi) {
 
 if (!nativeBinding) {
   if (loadErrors.length > 0) {
+    /* oktz-signal:hand-maintained:begin npm-advice-gating */
     // hand-maintained patch, not emitted by `napi build`: "npm has a bug
     // related to optional dependencies" is only actionable advice when the
     // candidates genuinely failed to resolve. Printed over a dlopen or
     // corruption failure it sends the reader after a reinstall that cannot
     // help, so it is now gated on the errors it actually applies to.
     const unresolvedOnly = loadErrors.every((e) => e && e.code === 'MODULE_NOT_FOUND')
+    /* oktz-signal:hand-maintained:end npm-advice-gating */
     const error = new Error(
       `Cannot find native binding. ` +
         (unresolvedOnly
@@ -852,4 +881,9 @@ module.exports.sessionHaveOpenSession = nativeBinding.sessionHaveOpenSession
 module.exports.sessionSerialize = nativeBinding.sessionSerialize
 module.exports.x3DhBuildInitialSession = nativeBinding.x3DhBuildInitialSession
 module.exports.x3DhBuildRecipientSession = nativeBinding.x3DhBuildRecipientSession
+/* oktz-signal:hand-maintained:begin default-export */
+// hand-maintained patch, not emitted by `napi build`: the CommonJS entry is
+// also consumed as an ES module, so `default` has to resolve to the binding
+// itself. tests/platform-loader.test.mjs asserts `native.default === native`.
 module.exports.default = nativeBinding
+/* oktz-signal:hand-maintained:end default-export */

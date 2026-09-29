@@ -54,6 +54,22 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           npm test
+      - name: Run the documentation gate
+        # The documentation is executable: scripts/docs-verify.mjs runs every
+        # fenced code block in README.md, CHANGELOG.md and docs/, plus every
+        # examples/*.mjs, and fails the run on a non-zero exit. Nothing in
+        # `npm test` touches the documentation that describes the
+        # implementation, so a signature or an example in prose can go stale
+        # indefinitely without this.
+        #
+        # Same leg as the JS suite, and for the same reason: every block
+        # imports the package, so the native binding has to load first. The
+        # `--js index.cjs` in the matrix command above does not regenerate the
+        # committed loader — @napi-rs/cli's writeJsBinding returns early
+        # without `--platform` — so both steps exercise the hand-patched loader
+        # that actually ships.
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: npm run docs:verify
       - name: Runtime status
         run: |
           echo "${{ matrix.target }}: ${{ matrix.status }}" >> "$GITHUB_STEP_SUMMARY"

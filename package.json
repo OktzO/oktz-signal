@@ -20,6 +20,7 @@
     "test:rust": "cargo test --manifest-path native/signal/Cargo.toml",
     "test:all": "npm run test:rust && npm test",
     "verify:loader": "node scripts/loader-guard.mjs verify native/signal/index.cjs",
+    "docs:verify": "node scripts/docs-verify.mjs",
     "prepublishOnly": "npm run build && npm run verify:loader"
   },
   "engines": {

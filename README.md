@@ -32,9 +32,11 @@ block on every documentation page, so none of it can quietly go stale.
 - **Linux only.** There is no macOS and no Windows build. See
   [Platform support](#platform-support).
 - **The version on `main` is not what `0.3.0-rc.1` shipped as.** `v0.3.0-rc.1`
-  is tagged at `8dfc4d3`; the 51 commits after it, including every security
-  fix in [the changelog](./CHANGELOG.md), are **unreleased**. What you install
-  from npm today does not contain them.
+  is tagged at `8dfc4d3`, and every commit after it — 57 of them at the time
+  of writing, including every security fix in [the
+  changelog](./CHANGELOG.md) — is **unreleased**. `package.json` still says
+  `0.3.0-rc.1`, so the package on npm today is `8dfc4d3` and contains none of
+  that work.
 - Wire compatibility with real WhatsApp clients is not guaranteed in every
   edge case. The interop evidence is against `libsignal` v6, which is a
   strong signal but not the same thing.

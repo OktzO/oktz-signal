@@ -5,10 +5,11 @@ a test, the test is named.
 
 ## Unreleased — on `main`, after `v0.3.0-rc.1`
 
-`v0.3.0-rc.1` is tagged at `8dfc4d3`. **The 51 commits after it are not
-released.** `package.json` already says `0.3.0-rc.1`, so the version on npm
-today is `8dfc4d3` and contains none of the security work below. If you are
-running the published package, every item under "Security" applies to you.
+`v0.3.0-rc.1` is tagged at `8dfc4d3`. **Every commit after it is not
+released** — 57 of them at the time of writing. `package.json` already says
+`0.3.0-rc.1`, so the version on npm today is `8dfc4d3` and contains none of
+the security work below. If you are running the published package, every item
+under "Security" applies to you.
 
 ### Security
 

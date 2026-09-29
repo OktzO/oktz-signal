@@ -9,7 +9,8 @@
     "index.js",
     "src/",
     "native/signal/index.cjs",
-    "napi.config.json"
+    "napi.config.json",
+    "native/signal/*.node"
   ],
   "scripts": {
     "build:native": "napi build --release --platform --js-package-name @oktz-signal/signal --config-path napi.config.json --manifest-path native/signal/Cargo.toml --output-dir native/signal --js index.cjs.generated",
@@ -30,11 +31,5 @@
     "@napi-rs/cli": "3.10.4",
     "js-yaml": "5.4.2",
     "libsignal": "^6.0.0"
-  },
-  "optionalDependencies": {
-    "@oktz-signal/signal-linux-arm64-gnu": "0.3.0-rc.2",
-    "@oktz-signal/signal-linux-arm64-musl": "0.3.0-rc.2",
-    "@oktz-signal/signal-linux-x64-gnu": "0.3.0-rc.2",
-    "@oktz-signal/signal-linux-x64-musl": "0.3.0-rc.2"
   }
 }

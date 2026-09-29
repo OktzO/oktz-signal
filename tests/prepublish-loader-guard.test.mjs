@@ -17,6 +17,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+
+// Read from package.json so a release bump cannot leave these assertions stale.
+const VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -160,7 +165,7 @@ const LOST_REGIONS = [
   },
   {
     region: 'version-check-helpers',
-    line: "const __napiBindingVersionIsStale = (bindingPackageVersion) => bindingPackageVersion !== '0.3.0-rc.1'\n",
+    line: `const __napiBindingVersionIsStale = (bindingPackageVersion) => bindingPackageVersion !== '${VERSION}'\n`,
   },
   {
     region: 'npm-advice-gating',
@@ -195,8 +200,8 @@ test('the loader patch fails closed when the generator output changes', async ()
     const staged = join(dir, 'index.cjs');
     const generated = readFileSync(staged, 'utf8');
     const drifted = generated.replace(
-      "if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK",
-      "if (bindingPackageVersion !== '0.3.0-rc.1' && process.env.SOME_RENAMED_ENFORCEMENT_FLAG",
+      `if (bindingPackageVersion !== '${VERSION}' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK`,
+      `if (bindingPackageVersion !== '${VERSION}' && process.env.SOME_RENAMED_ENFORCEMENT_FLAG`,
     );
     assert.notEqual(drifted, generated, 'the drift fixture did not change the generated loader');
     writeFileSync(staged, drifted);

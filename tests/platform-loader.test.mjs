@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+
+// Read from package.json so a release bump cannot leave these assertions stale.
+const VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
+const ESCAPED_VERSION = VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -197,7 +203,7 @@ const DLOPEN_FAILURE = new Error('dlopen: cannot open shared object file: No suc
 // failure is the one worth reading.
 const INSTALLED_BUT_UNLOADABLE = {
   throwsFor: { '@oktz-signal/signal-linux-x64-musl': DLOPEN_FAILURE },
-  provides: { '@oktz-signal/signal-linux-x64-musl/package.json': { version: '0.3.0-rc.1' } },
+  provides: { '@oktz-signal/signal-linux-x64-musl/package.json': { version: VERSION } },
 };
 
 test('the real native failure is the outermost cause, not an absent WASI package', () => {
@@ -313,7 +319,7 @@ const STALE_PLATFORM_PACKAGE = {
 
 test('a version-mismatched platform package is rejected without opting in', () => {
   const { thrown } = runLoader({ ...STALE_PLATFORM_PACKAGE, env: {} });
-  assert.match(thrown.message, /version mismatch, expected 0\.3\.0-rc\.1 but got 0\.1\.0/);
+  assert.match(thrown.message, new RegExp(`version mismatch, expected ${ESCAPED_VERSION} but got 0\\.1\\.0`));
 });
 
 test('a version-mismatched platform package reports the version error, not MODULE_NOT_FOUND', () => {
@@ -330,7 +336,7 @@ test('a version-mismatched platform package reports the version error, not MODUL
 
 test('a version-mismatched platform package is still rejected when enforcement is requested', () => {
   const { thrown } = runLoader({ ...STALE_PLATFORM_PACKAGE, env: { NAPI_RS_ENFORCE_VERSION_CHECK: '1' } });
-  assert.match(thrown.message, /version mismatch, expected 0\.3\.0-rc\.1 but got 0\.1\.0/);
+  assert.match(thrown.message, new RegExp(`version mismatch, expected ${ESCAPED_VERSION} but got 0\\.1\\.0`));
 });
 
 test('a matching platform package loads', () => {
@@ -338,7 +344,7 @@ test('a matching platform package loads', () => {
     ldd: 'ldd (GNU libc) 2.39',
     provides: {
       '@oktz-signal/signal-linux-x64-gnu': { curveSign() {} },
-      '@oktz-signal/signal-linux-x64-gnu/package.json': { version: '0.3.0-rc.1' },
+      '@oktz-signal/signal-linux-x64-gnu/package.json': { version: VERSION },
     },
     env: {},
   });

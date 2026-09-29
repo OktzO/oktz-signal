@@ -1,6 +1,6 @@
 {
   "name": "oktz-signal",
-  "version": "0.3.0-rc.1",
+  "version": "0.3.0-rc.2",
   "type": "module",
   "description": "Signal protocol Rust native — MIT replacement for libsignal (GPL)",
   "main": "index.js",
@@ -32,9 +32,9 @@
     "libsignal": "^6.0.0"
   },
   "optionalDependencies": {
-    "@oktz-signal/signal-linux-arm64-gnu": "0.3.0-rc.1",
-    "@oktz-signal/signal-linux-arm64-musl": "0.3.0-rc.1",
-    "@oktz-signal/signal-linux-x64-gnu": "0.3.0-rc.1",
-    "@oktz-signal/signal-linux-x64-musl": "0.3.0-rc.1"
+    "@oktz-signal/signal-linux-arm64-gnu": "0.3.0-rc.2",
+    "@oktz-signal/signal-linux-arm64-musl": "0.3.0-rc.2",
+    "@oktz-signal/signal-linux-x64-gnu": "0.3.0-rc.2",
+    "@oktz-signal/signal-linux-x64-musl": "0.3.0-rc.2"
   }
 }

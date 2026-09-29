@@ -1,9 +1,15 @@
 {
   "name": "@oktz-signal/signal-linux-x64-gnu",
-  "version": "0.3.0-rc.1",
+  "version": "0.3.0-rc.2",
   "license": "MIT",
   "main": "signal.linux-x64-gnu.node",
-  "files": ["signal.linux-x64-gnu.node"],
-  "os": ["linux"],
-  "cpu": ["x64"]
+  "files": [
+    "signal.linux-x64-gnu.node"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ]
 }

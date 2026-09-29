@@ -38,6 +38,15 @@ import { Script } from 'node:vm';
 const begin = (id) => `/* oktz-signal:hand-maintained:begin ${id} */`;
 const end = (id) => `/* oktz-signal:hand-maintained:end ${id} */`;
 
+// The loader bakes the binding version into all 27 version checks, and both
+// the hand-maintained output and the anchors below carry their own copies.
+// Read it from package.json so a release bump cannot leave a stale string
+// behind and silently fail the guard.
+const { version: VERSION } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+);
+const VERSION_RE = VERSION.replace(/[.*+?^${}()|[]\\]/g, '\\const end = (id) => `/* oktz-signal:hand-maintained:end ${id} */`;');
+
 const regions = [
   {
     id: 'version-check-helpers',
@@ -58,10 +67,10 @@ ${begin('version-check-helpers')}
 // the \`catch\` re-buried it as a MODULE_NOT_FOUND candidate miss. The checks
 // are now unconditional, and a mismatch propagates out of requireNative()
 // instead of joining the candidate list.
-const __napiBindingVersionIsStale = (bindingPackageVersion) => bindingPackageVersion !== '0.3.0-rc.1'
+const __napiBindingVersionIsStale = (bindingPackageVersion) => bindingPackageVersion !== '${VERSION}'
 
 const __napiBindingVersionMismatch = (bindingPackageVersion, flavor) => {
-  const error = new Error(\`\${flavor || 'Native'} binding package version mismatch, expected 0.3.0-rc.1 but got \${bindingPackageVersion}. You can reinstall dependencies to fix this issue.\`)
+  const error = new Error(\`\${flavor || 'Native'} binding package version mismatch, expected ${VERSION} but got \${bindingPackageVersion}. You can reinstall dependencies to fix this issue.\`)
   error.code = 'ERR_NAPI_BINDING_VERSION_MISMATCH'
   return error
 }
@@ -152,7 +161,14 @@ const isMusl = () => {`,
       {
         // 26 sites, one per platform package, at five indentation depths. The
         // 27th check is the WASI package, which is its own region.
-        find: /^(\s*)if \(bindingPackageVersion !== '0\.3\.0-rc\.1' && process\.env\.NAPI_RS_ENFORCE_VERSION_CHECK && process\.env\.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'\) \{\n\s*throw new Error\(`Native binding package version mismatch[^\n]*\)\n\1\}/gm,
+        find: new RegExp(
+          `^(\\s*)if \\(bindingPackageVersion !== '${VERSION_RE}' && ` +
+            `process\\.env\\.NAPI_RS_ENFORCE_VERSION_CHECK && ` +
+            `process\\.env\\.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'\\) \\{\\n` +
+            `\\s*throw new Error\\(\`Native binding package version mismatch[^\\n]*\\)\\n` +
+            `\\1\\}`,
+          'gm'
+        ),
         replace: '$1if (__napiBindingVersionIsStale(bindingPackageVersion)) {\n$1  throw __napiBindingVersionMismatch(bindingPackageVersion)\n$1}',
         expect: /^(\s*)if \(__napiBindingVersionIsStale\(bindingPackageVersion\)\) \{\n\s*throw __napiBindingVersionMismatch\(bindingPackageVersion\)\n\1\}/gm,
         count: 26,
@@ -220,8 +236,8 @@ function requireNative() {`,
       {
         find: `        if (process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           const bindingPackageVersion = require('@oktz-signal/signal-wasm32-wasi/package.json').version
-          if (bindingPackageVersion !== '0.3.0-rc.1') {
-            throw new Error(\`WASI binding package version mismatch, expected 0.3.0-rc.1 but got \${bindingPackageVersion}. You can reinstall dependencies to fix this issue.\`)
+          if (bindingPackageVersion !== '${VERSION}') {
+            throw new Error(\`WASI binding package version mismatch, expected ${VERSION} but got \${bindingPackageVersion}. You can reinstall dependencies to fix this issue.\`)
           }
         }`,
         replace: `        ${begin('wasi-version-check')}

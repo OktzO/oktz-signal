@@ -32,7 +32,7 @@
 //   node scripts/docs-verify.mjs <path>...  verify specific files or directories
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -123,14 +123,26 @@ const report = (ok, label, detail) => {
   return false;
 };
 
-// --- markdown code blocks ----------------------------------------------------
+// --- what to check ---------------------------------------------------------
 
 const markdownFiles = (targets.length ? targets : DEFAULT_SOURCES)
   .flatMap((t) => walk(resolve(root, t)))
   .filter((f) => extname(f) === '.md');
 
-if (markdownFiles.length === 0) {
-  process.stderr.write('docs:verify found no markdown to check — pass a path\n');
+const exampleDir = resolve(root, 'examples');
+// Scoped runs are common (`docs-verify.mjs docs`), so examples/ is included
+// whenever the caller named this repository's default set or the directory
+// itself. An explicit path elsewhere is taken literally.
+const exampleFiles = (!targets.length || targets.some((t) => resolve(root, t) === exampleDir))
+  ? walk(exampleDir).filter((f) => extname(f) === '.mjs')
+  : [];
+
+// Bailing out on "no markdown" alone would be a trap: `docs-verify.mjs
+// examples` is a reasonable thing to type, and a broken example under it would
+// have been skipped and the run would still have exited 0. Only a run with
+// nothing at all to do is an error.
+if (markdownFiles.length === 0 && exampleFiles.length === 0) {
+  process.stderr.write('docs:verify found nothing to check — pass a path\n');
   process.exit(1);
 }
 
@@ -194,21 +206,16 @@ for (const file of markdownFiles) {
 
 // --- examples/ ---------------------------------------------------------------
 
-const exampleDir = resolve(root, 'examples');
-if (!targets.length || targets.some((t) => resolve(root, t).startsWith(exampleDir))) {
-  mkdirSync(exampleDir, { recursive: true });
-  for (const file of walk(exampleDir)) {
-    if (extname(file) !== '.mjs') continue;
-    examples += 1;
-    const result = runNode(file);
-    const rel = relative(root, file);
-    const ok = result.status === 0;
-    say(`  ${ok ? 'run ' : 'FAIL'}  ${rel}`);
-    if (ok) {
-      if (result.stdout && result.stdout.trim()) say(indent(result.stdout.trimEnd()));
-    } else {
-      report(false, rel, `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() || 'no output');
-    }
+for (const file of exampleFiles) {
+  examples += 1;
+  const result = runNode(file);
+  const rel = relative(root, file);
+  const ok = result.status === 0;
+  say(`  ${ok ? 'run ' : 'FAIL'}  ${rel}`);
+  if (ok) {
+    if (result.stdout && result.stdout.trim()) say(indent(result.stdout.trimEnd()));
+  } else {
+    report(false, rel, `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() || 'no output');
   }
 }
 

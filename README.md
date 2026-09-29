@@ -6,244 +6,367 @@
 
 [![Version](https://img.shields.io/badge/npm-0.3.0--rc.1-339933?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/oktz-signal)
 [![Node](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
-[![Rust](https://img.shields.io/badge/Rust-native%20napi--rs-red?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Benchmark](https://img.shields.io/benchmark/E2EE%20session%20build%209%C3%97%20vs%20libsignal-9cf?style=for-the-badge)](#-benchmark-vs-libsignal)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 </div>
 
-**oktz-signal** adalah implementasi ulang (clean-room) dari Signal Protocol (X3DH + Double Ratchet + session record + protobuf codec) untuk WhatsApp Multi-Device, ditulis dalam **Rust** via **napi-rs** dan dibungkus JS. Dibuat sebagai pengganti `libsignal` (GPL-3.0) yang **license-safe** (MIT).
+**oktz-signal** is a Rust implementation of the Signal Protocol — X3DH, the
+Double Ratchet, the session record format and the protobuf codec — exposed
+through napi-rs with a thin JS wrapper. It is MIT-licensed, and it is wire
+compatible with `libsignal` v6 (`WhiskeySockets/libsignal-node`), which is
+GPL-3.0 and therefore not something many projects can ship.
 
-Wire format diverifikasi lewat oracle `libsignal` v6 (WhiskeySockets/libsignal-node) dengan test interop dua arah: `libsignal` encrypt → `oktz-signal` decrypt, dan sebaliknya. **Byte-exactness signature tidak tercapai dan memang tidak bisa dicapai** — nonce XEdDSA sudah diacak demi keamanan, dan `libsignal` v6 tidak menyediakan cara menyamakan nonce. Bukti yang masih berlaku dijelaskan di [Verifikasi kebenaran](#verifikasi-kebenaran-bukan-cuma-cepat).
+Every claim below is traceable to a line of this repository, a test that
+exists, or a command quoted with its output. Where something is *not*
+verified, it says so instead of implying otherwise. The
+[documentation](./docs) is executable: `npm run docs:verify` runs every code
+block on every documentation page, so none of it can quietly go stale.
 
 ---
 
 ## ⚠️ Status: UNSTABLE / EXPERIMENTAL
 
-> **Proyek ini masih dalam tahap produksi awal (alpha).** Dipakai di `oktz-baileys` dan bot `ourin-md` untuk menggantikan `libsignal`, namun:
-
-- **Wire compatibility** terhadap klien WhatsApp resmi **belum 100% terjamin** di semua edge case (perangkat lama, iOS versi lawas, re-sync session, backlog message).
-- Bug interop ditemukan & diperbaiki terus (lihat [Changelog](#-changelog)) — **upgrade minor disarankan**.
-- **Belum diaudit keamanan pihak ketiga.** Jangan pakai untuk skenario yang butuh jaminan audit formal.
-- API masih bisa berubah antar minor version.
+- **Never audited by a third party.** There is no formal security review of
+  this code. The [audit notes](#known-limitations) below are a line-by-line
+  reading plus the tests written from it — not an assessment.
+- **Linux only.** There is no macOS and no Windows build. See
+  [Platform support](#platform-support).
+- **The version on `main` is not what `0.3.0-rc.1` shipped as.** `v0.3.0-rc.1`
+  is tagged at `8dfc4d3`; the 51 commits after it, including every security
+  fix in [the changelog](./CHANGELOG.md), are **unreleased**. What you install
+  from npm today does not contain them.
+- Wire compatibility with real WhatsApp clients is not guaranteed in every
+  edge case. The interop evidence is against `libsignal` v6, which is a
+  strong signal but not the same thing.
+- The API can change between minor versions.
 
 ---
 
-## Fitur
+## Install
 
-- **X3DH** — build session initiator & recipient (identity key, signed prekey, one-time prekey).
-- **Double Ratchet** — message keys, chain stepping, skipped-message keys, DH ratchet, MAC.
-- **SessionRecord** — serialize/deserialize format `libsignal` v6 (`_sessions`, `_chains`).
-- **Protobuf codec** — `WhisperMessage` & `PreKeyWhisperMessage` wire format, hand-written.
-- **Curve** — X25519 DH, XEdDSA sign/verify, generate keypair (Rust, `curve25519-dalek`).
-- **JS wrapper** — `SessionCipher`, `SessionBuilder`, `SessionRecord`, `ProtocolAddress`, `QueueJob`.
-
-## Instalasi
-
-```bash
+```bash nonrunnable
 npm install oktz-signal
 ```
 
-Binary native **tidak disertakan di dalam package `oktz-signal`** — package utama hanya berisi loader + wrapper JS. Yang dipublish adalah 4 platform package terpisah, terpasang otomatis sebagai `optionalDependencies`:
+The main package ships **no native binary**. It contains the JS wrapper, the
+platform loader and `napi.config.json` — 13 files, a 21.7 kB tarball, and zero
+`.node` files (`tests/pack-install.test.mjs` asserts the last two on every
+`npm test`). The binary arrives through four platform packages installed as
+`optionalDependencies`.
 
-| Platform package | Target |
+### Platform support
+
+| Platform package | Target | Published |
+|---|---|---|
+| `@oktz-signal/signal-linux-x64-gnu` | `x86_64-unknown-linux-gnu` | yes |
+| `@oktz-signal/signal-linux-x64-musl` | `x86_64-unknown-linux-musl` (Alpine) | yes |
+| `@oktz-signal/signal-linux-arm64-gnu` | `aarch64-unknown-linux-gnu` | yes |
+| `@oktz-signal/signal-linux-arm64-musl` | `aarch64-unknown-linux-musl` | yes |
+
+That is the whole list, and it is the list in `package.json:33-38` and the
+publish steps in `.github/workflows/release.yml:121-132`.
+
+- **macOS: not built, not published, not supported.** No `darwin` target
+  appears in `napi.config.json` or any workflow.
+- **Windows: not built, not published, not supported.** Same.
+- **Android / Termux: cross-compiled in CI, deliberately not published.** The
+  `aarch64-linux-android` build runs in both workflows and produces an
+  artifact, but there is no publish step for it and it is not in
+  `optionalDependencies`. `release.yml:109-113` says why: a
+  `workflow_dispatch` boolean used to stand in for a Termux run that does not
+  exist, so nothing had ever loaded that binary before it would have shipped.
+  **On Termux, `npm install` gives you the JS wrapper and no `.node`** — build
+  it yourself.
+
+### What has and has not actually been run
+
+Be precise about this, because the difference matters:
+
+| | Status |
 |---|---|
-| `@oktz-signal/signal-linux-x64-gnu` | `x86_64-unknown-linux-gnu` |
-| `@oktz-signal/signal-linux-x64-musl` | `x86_64-unknown-linux-musl` (Alpine) |
-| `@oktz-signal/signal-linux-arm64-gnu` | `aarch64-unknown-linux-gnu` |
-| `@oktz-signal/signal-linux-arm64-musl` | `aarch64-unknown-linux-musl` |
+| `x86_64-unknown-linux-gnu` binary | **built and loaded.** CI runs the full JS suite against it (`ci.yml:53-56`). |
+| musl x64/arm64, glibc arm64 binaries | **built in CI. Never loaded** — no runner executes them, and this repository's tests cannot. |
+| Android arm64 binary | **cross-compiled in CI. Never loaded, never published.** |
 
-> ⚠️ **Android / Termux tidak punya prebuilt.** Binary `aarch64-linux-android` masih di-cross-compile di CI sebagai artifact, tapi **sengaja tidak dipublish** dan sudah dihapus dari `optionalDependencies` — `npm install` di Termux tidak akan mendapatkan `.node` dan harus build dari source. Alasannya, artifact itu belum pernah benar-benar di-load di runtime Android, jadi mempubliskannya tanpa bukti.
+The four arm64/musl claims above are compile results, not runtime results. The
+workload that would prove them needs the corresponding hardware.
 
-Untuk platform lain, build dari source:
+### Building for an unsupported platform
 
-```bash
-npm run build:native   # butuh Rust + gcc (nix-shell -p gcc)
-```
-
-### Manual build commands (untuk developer & host tidak didukung)
-
-Prasyarat per target:
-- **Linux x64 GNU (default)**: Rust stable + `gcc` / `clang`
-- **Linux x64 musl (Alpine)**: Rust stable + `musl-gcc` + **Zig** (cross-compile via `zig cc`)
-- **Linux ARM64 GNU**: Rust stable + `aarch64-linux-gnu-gcc` + **Zig** (cross-compile via `zig cc`)
-- **Linux ARM64 musl (Alpine)**: Rust stable + **Zig** (cross-compile via `zig cc`)
-- **Android ARM64 (Termux)** — *tidak dipublish, build sendiri*: Rust stable + **Android NDK** + `rustup target add aarch64-linux-android`
-
-Commands (dijalankan dari root repo `oktz-signal`):
-
-```bash
-# Linux x64 GNU (native build)
-cargo build --manifest-path native/signal/Cargo.toml --release --target x86_64-unknown-linux-gnu
-
-# Linux x64 musl (cross-compile, butuh Zig)
-rustup target add x86_64-unknown-linux-musl
-cargo build --manifest-path native/signal/Cargo.toml --release --target x86_64-unknown-linux-musl
-
-# Linux ARM64 GNU (cross-compile, butuh Zig + aarch64-linux-gnu toolchain)
-rustup target add aarch64-unknown-linux-gnu
-cargo build --manifest-path native/signal/Cargo.toml --release --target aarch64-unknown-linux-gnu
-
-# Linux ARM64 musl (cross-compile, butuh Zig)
-rustup target add aarch64-unknown-linux-musl
-cargo build --manifest-path native/signal/Cargo.toml --release --target aarch64-unknown-linux-musl
-
-# Android ARM64 (butuh Android NDK di $ANDROID_NDK_HOME atau $ANDROID_HOME/ndk/...)
+```bash nonrunnable
 rustup target add aarch64-linux-android
-cargo build --manifest-path native/signal/Cargo.toml --release --target aarch64-linux-android
+cargo build --manifest-path native/signal/Cargo.toml --release \
+  --target aarch64-linux-android
 ```
 
-> **Catatan**: Command di atas memakai `cargo` langsung (bukan `napi build`) untuk build dari source tanpa napi-rs CLI. Hasil binary ada di `native/signal/target/<target>/release/libsignal.{so|dylib|dll}`. Untuk publish ke npm, gunakan `napi build --release --target <target> ...` seperti di CI.
+You need the Android NDK, and you need to supply the `ANDROID_NDK_HOME` linker
+configuration yourself. The musl and arm64 targets need Zig
+(`taiki-e/install-action` in CI, or `zig cc`) for the cross link. For
+publishing, use `napi build --release --target <target> …` as the workflows do;
+plain `cargo build` leaves a `libsignal.so` rather than a named `.node`.
 
-### Platform install verification
-
-Setelah install (via npm atau build lokal), verifikasi native module load:
-
-```bash
-# Verifikasi native API tersedia
-node -e "import('oktz-signal').then(({ native }) => console.log(typeof native.ratchetEncrypt))"
-# Output: function
-```
-
-Command tersebut harus mengeluarkan `function`. Jika error/undefined, native binary tidak cocok platform atau gagal load — `oktz-signal` tidak punya dependency runtime sama sekali, jadi apa pun yang gagal di sini adalah masalah load `.node`, bukan dependency yang kurang.
-
-## Penggunaan
+### Verifying the native module loads
 
 ```js
-import { SessionCipher, SessionBuilder, SessionRecord, ProtocolAddress } from 'oktz-signal';
+// In a checkout. From an installed package the specifier is 'oktz-signal'.
+import { native } from './index.js';
 
-const addr = new ProtocolAddress('628xxxxxxx.0', 0);
-const cipher = new SessionCipher(storage, addr);
-
-// Decrypt incoming
-const plaintext = await cipher.decryptPreKeyWhisperMessage(ciphertext);
-// atau
-const plaintext = await cipher.decryptWhisperMessage(ciphertext);
-
-// Encrypt outgoing
-const { type, body } = await cipher.encrypt(data); // type: 1 = msg, 3 = pkmsg
+console.log('curveSign is', typeof native.curveSign);
+console.log('ratchetEncrypt is', typeof native.ratchetEncrypt);
+console.log('16 exports:', Object.keys(native).filter((k) => typeof native[k] === 'function').length);
 ```
 
-`storage` harus mengimplementasikan antarmuka yang sama dengan libsignal (`loadSession`, `storeSession`, `getOurIdentity`, `getOurRegistrationId`, `loadPreKey`, `loadSignedPreKey`, `loadSenderKey`, `storeSenderKey`).
+This package has no runtime dependencies, so if this fails the problem is the
+`.node` — wrong platform, or a platform package whose version does not match
+this loader. The loader enforces that version match unconditionally
+(`tests/platform-loader.test.mjs:314-334`), so a stale platform package fails
+loudly at require time rather than crashing later inside the addon.
 
-## Testing
+---
 
-```bash
-npm test                                   # unit + wrapper
-node --test tests/oracle/interop.test.mjs  # oracle vs libsignal (butuh libsignal terinstall)
+## Usage
+
+```js nonrunnable
+// Sketch only — the runnable version, with a real storage and real keys, is
+// docs/quickstart.md and examples/handshake.mjs.
+import { ProtocolAddress, SessionBuilder, SessionCipher } from 'oktz-signal';
+
+const addr = new ProtocolAddress('6280000000000.0', 0);
+
+// Outgoing, against a prekey bundle you fetched from a server:
+await new SessionBuilder(storage, addr).initOutgoing(bundle);
+const { type, body } = await new SessionCipher(storage, addr).encrypt(data);
+// type 3 = PreKeyWhisperMessage, type 1 = WhisperMessage
+
+// Incoming — use this one when you do not know whether a session exists yet:
+const fromPreKey = await new SessionCipher(storage, addr)
+  .decryptPreKeyWhisperMessage(incoming);
+// ...or, when you do know it is a plain ratchet message:
+const fromRatchet = await new SessionCipher(storage, addr)
+  .decryptWhisperMessage(incoming);
+```
+
+`storage` is seven async methods and nothing else. `loadSenderKey`,
+`storeSenderKey` and `saveIdentity` are never called — this package does not
+implement group messaging.
+
+```js nonrunnable
+getOurIdentity()              -> { privKey: Buffer(32), pubKey: Buffer(33) }
+getOurRegistrationId()        -> number
+loadSession(address)          -> SessionRecord | null
+storeSession(address, record) -> void
+loadPreKey(id)                -> { privKey, pubKey } | null
+loadSignedPreKey(id)          -> { privKey, pubKey } | null
+removePreKey(id)              -> void   // a throw here is reported, not swallowed
+```
+
+A complete in-memory implementation is in
+[`docs/storage-stub.mjs`](./docs/storage-stub.mjs), and a full two-peer
+handshake is in [`examples/handshake.mjs`](./examples/handshake.mjs) — run it
+with `node examples/handshake.mjs`.
+
+- [docs/quickstart.md](./docs/quickstart.md) — a runnable handshake
+- [docs/api.md](./docs/api.md) — every export, with its real signature
+- [docs/protocol.md](./docs/protocol.md) — what the implementation does, cited
+  to `file:line`
+
+---
+
+## What is actually verified
+
+Everything in this section is a test that exists in this repository. The one
+cross-implementation check is the oracle, and it is described honestly below.
+
+### Against `libsignal` v6
+
+`tests/oracle/interop.test.mjs` is the only evidence that this speaks the same
+protocol as something else. It has three parts:
+
+- **libsignal → oktz-signal, both directions.** `libsignal` owns *both*
+  endpoints and writes the receiver's session record itself; oktz-signal is
+  dropped in as that receiver. A four-turn conversation crosses DH ratchet
+  steps in both engines, with the record handed back and forth.
+- **oktz-signal → libsignal.** oktz-signal builds the session and encrypts;
+  `libsignal`'s own `SessionCipher` decrypts.
+- **Session record.** A record `libsignal` serialised is parsed by
+  `sessionDeserialize`.
+
+This matters because the previous version of that test was tautological. It
+hand-built the receiver's record in oktz-signal's own shape — its own
+`chainType: 0` and its own 32-byte chain keys — so the test named
+"libsignal → oktz-signal interop" never once let `libsignal` produce a
+receiver record. The real interop was one-directional and broken: oktz-signal
+could not decrypt a single message from a session `libsignal` had established
+(three record-format mismatches, fixed in `fc0d234`). See
+[the changelog](./CHANGELOG.md).
+
+**Running it needs `libsignal`, which is a GPL devDependency.** It is not
+shipped — it is not in `files` and no `.node` or dependency reaches the
+tarball — but it is installed by `npm ci`, and three test files import it:
+`tests/oracle/interop.test.mjs`, `tests/ratchet-libsignal-record.test.mjs` and
+`tests/ratchet-prev-counter.test.mjs`. Without it `npm test` is **not green**:
+those three files fail to import and the run exits 1 with 3 failures. This was
+measured, not assumed.
+
+### Known-answer vectors
+
+External vectors, not self-consistency:
+
+- **X25519**, RFC 7748 §5.2 (`curve.rs:238-254`).
+- **XEdDSA**, a `curve25519-js` vector on the `rnd` path (`curve.rs:392-405`).
+- **Protobuf wire bytes** for both message types (`proto.rs:423-433`,
+  `proto.rs:667-685`).
+
+There are **no** separate known-answer vectors for the shared-secret layout,
+the info strings, the message-key schedule or the AES-CBC+MAC construction.
+Those are covered only end-to-end, by the oracle and by the round-trip tests.
+Anyone reading this should know the difference.
+
+### Cryptographic and protocol behaviour
+
+- **Out-of-order delivery inside one ratchet epoch** — 2500 messages delivered
+  in shuffled order, none resent (`tests/ratchet-counter-window.test.mjs`), plus
+  a 3 → 2 → 1 reversal in `examples/ratchet-epochs.mjs`.
+- **The 2000-message skip bound is a distance, not an absolute counter**, and a
+  counter 2001 ahead of the chain is refused before any key is derived
+  (`ratchet.rs:41`, `ratchet.rs:205`).
+- **Forgery resistance**: a chain emptied by a ratchet step cannot decrypt
+  (`tests/forgery.test.mjs`); a bad MAC leaves the record bit-for-bit
+  unchanged and does not apply the ratchet step
+  (`bad_mac_leaves_the_record_untouched`, `bad_mac_does_not_step_the_ratchet`).
+- **Pre-authentication**: a forged `PreKeyWhisperMessage` neither persists a
+  session nor burns a one-time prekey, and the victim can still send
+  (`tests/session-pkmsg-auth.test.mjs`).
+- **Multi-entry records** select the open session, not the first
+  (`tests/multi-session.test.mjs`); archived entries are capped at 40
+  (`tests/session-archive-cap.test.mjs`).
+- **Loader hardening** — 25 assertions over version enforcement, platform
+  dispatch, WASI suppression and error surfacing
+  (`tests/platform-loader.test.mjs`), plus a guard that refuses to publish a
+  regenerated loader (`tests/prepublish-loader-guard.test.mjs`).
+
+### Test counts
+
+Measured on this tree:
+
+```bash nonrunnable
+cargo test --locked --manifest-path native/signal/Cargo.toml   # 83 passed, 0 failed
+npm test                                                      # 132 passed, 0 failed, 23 files
+npm run docs:verify                                           # 25 blocks + 3 examples, 0 failures
 ```
 
 ---
 
-## ⏱️ Benchmark vs libsignal
+## What is **not** verified
 
-Diukur pada Node v20.19.1, Linux x64, in-process loop, kunci acak per iterasi (bukan kunci deterministik). **Angka di bawah adalah hasil pengukuran yang tercatat, bukan output yang bisa direproduksi dari repo ini — tidak ada script benchmark di test suite maupun di `package.json`.** Perlakukan sebagai indikasi urutan besaran, bukan benchmark yang bisa dijalankan ulang.
+Stated plainly, because a README that only lists strengths is not a README you
+can rely on.
 
-### 1. Sesi penuh (X3DH + PKMsg encrypt + decrypt)
+**XEdDSA signatures are not byte-identical to libsignal, and cannot be.**
+This is not an unfinished task. `libsignal@6.0.0`'s
+`curve.calculateSignature(privKey, message)` takes two arguments and hard-codes
+`curve25519-js`'s `crypto_sign_direct`, so there is no way to inject a shared
+nonce from either side. Since this implementation draws its nonce from
+`OsRng` when none is supplied (`curve.rs:128-138`) — which it must, because a
+deterministic `SHA512(sk‖m)` nonce lets two chosen-message signatures recover
+the identity key via a lattice attack — the two engines pick different nonces
+by design. The earlier byte-for-byte comparison passed only because both sides
+shared that unsafe nonce.
 
-Satu siklus lengkap membangun session baru: initOutgoing (X3DH: 3× X25519 + HKDF) → encrypt pkmsg → initIncoming → decrypt.
+What replaced it is narrower and still real: public key derivation is
+byte-identical, and signatures cross-verify **in both directions across 100
+random cases** (`tests/oracle/interop.test.mjs:28`). The deterministic path is
+pinned separately by a `curve25519-js` known-answer vector.
 
-| Implementasi | µs/op | Speedup |
-|---|---:|---:|
-| **oktz-signal (Rust native)** | **3.519** | — |
-| libsignal v6 (JS, WhiskeySockets) | 31.849 | **oktz-signal 9,0× lebih cepat** |
+**A message held back across a DH ratchet step is rejected.** The step removes
+the previous receiving chain from the record rather than blanking its key, so
+its keys no longer exist. `libsignal` retires a chain the same way; this is
+protocol behaviour, not a shortcut. Demonstrated, not asserted, in
+`examples/ratchet-epochs.mjs`.
 
-### 2. Steady-state (Double Ratchet encrypt + decrypt per pesan)
+**No third-party audit.** See [Status](#️-status-unstable--experimental).
 
-Session sudah ter-establish, satu pesan bolak-balik (ratchet step + AES-256-CBC + MAC di kedua arah):
+**No performance claim.** The previous versions of this README published
+benchmarks — "9× faster than libsignal" and so on. There is no benchmark
+script in this repository, in `package.json`, or anywhere in its git history,
+so none of those numbers can be reproduced or checked. They have been removed
+rather than restated. If you need a comparison, measure it yourself.
 
-| Implementasi | µs/op | Speedup |
-|---|---:|---:|
-| **oktz-signal (via JS wrapper)** | **195–330*** | — |
-| libsignal v6 (JS) | 570–695 | **oktz-signal 2–3,5× lebih cepat** |
+**No group messaging.** SenderKey is not implemented. This is 1:1 only.
 
-\* Rentang antar-run; raw native call tanpa wrapper JS = **278 µs** — wrapper (QueueJob + serialize + JSON.parse) menambah ±110 µs/op. Ini target optimasi berikutnya (lihat [Audit](#-audit-internal--known-limitations)).
+**No `isTrustedIdentity` check.** It is never called, so a peer swapping its
+identity key is not detected here. Enforce it in your own storage if you need
+trust-on-first-use.
 
-### 3. Crypto primitive (Rust native, `curve.rs`)
-
-| Operasi | oktz-signal (Rust) | libsignal (JS) | Speedup |
-|---|---:|---:|---:|
-| XEdDSA sign (64-byte) | 165,6 µs | 30.724 µs | **186×** |
-| XEdDSA verify (64-byte) | 138,9 µs | 32.295 µs | **233×** |
-| X25519 DH | 330,8 µs | 308,2 µs | ~par (keduanya native) |
-
-### Verifikasi kebenaran (bukan cuma cepat)
-
-Yang benar-benar ada di test suite hari ini:
-
-- ✅ **Oracle interop 2-arah** vs `libsignal` v6 (`tests/oracle/interop.test.mjs`) — `libsignal` encrypt → `oktz-signal` decrypt **dan** sebaliknya, plus session record `libsignal` → `oktz-signal` deserialize. Ini pembuktian perilaku end-to-end atas wire format, bukan perbandingan byte.
-- ✅ **Public key derivation byte-identical** dengan `libsignal`, dan **signature cross-verified 2-arah pada 100 kasus acak** — `libsignal` memverifikasi signature oktz, oktz memverifikasi signature `libsignal`.
-- ✅ **Known-answer vectors** (Rust, vektor eksternal — bukan self-consistency): X25519 RFC 7748 §5.2 (`curve.rs`), XEdDSA dengan vektor dari curve25519-js pada jalur `rnd` (`curve.rs`), dan byte protobuf `WhisperMessage`/`PreKeyWhisperMessage` (`proto.rs`).
-- ✅ **Tamper & forgery** — MAC rusak ditolak, dan receiving chain yang dikosongkan oleh ratchet step tidak bisa dipakai untuk decrypt forged message.
-- ✅ **Skipped-message keys** — enkripsi/decrypt multi-pesan dengan chain stepping, plus cap 2000 message yang diuji (`ratchet.rs`).
-
-Yang **tidak** terverifikasi, dan sebaiknya tidak diklaim sebagai ✅:
-
-- ❌ **Byte-exactness signature XEdDSA — tidak tercapai dan tidak bisa dicapai.** `libsignal@6.0.0` `curve.calculateSignature(privKey, message)` ber-arity 2 dan hard-code `curve25519-js`'s `crypto_sign_direct`, jadi nonce tidak bisa di-inject dari sisi mana pun. Sejak nonce diacak (RFC 8032 hashed random prefix supaya identity key tidak bisa direcover dari dua chosen-message signature), kedua engine memang memilih nonce berbeda. Bukti yang lebih kuat menggantikannya: pubkey byte-exact + cross-verification 2-arah 100 kasus + KAT di jalur `rnd`.
-- ❌ **Out-of-order delivery #3 → #2 → #1** — tidak ada test yang mengalamatkan pesan terbalik. `ratchet.rs` mengimplementasikan skipped-message keys, tapi perilakunya belum dibuktikan test. Jangan anggap backlog terverifikasi.
-- ❌ **KAT terpisah untuk layout shared secret, info string, message key derivation, dan AES-CBC+MAC** — tidak ada. Aspek-aspek itu hanya tercakup secara tidak langsung lewat interop end-to-end di atas.
-- ⚠️ **Replay & reuse session by baseKey** — jalur kodenya ada (`sessionHasBaseKey` di `session-cipher.js`: pesan PKMsg dengan baseKey yang sudah ada tidak memicu rebuild), dan secara tidak langsung teruji lewat test archive/queue. Tapi **tidak ada test yang mengirim PKMsg kedua dengan baseKey sama lalu assert tidak ada rebuild** — jadi klaim ini belum layak dianggap "terverifikasi".
-- ✅ **pendingPreKey semantics** — pesan type-3 dibungkus ulang ke type-3 sampai recipient membalas, lalu `entry.pendingPreKey` dihapus saat decrypt (`ratchet.rs`). Perilaku ini ter-cover end-to-end oleh test wrapper (`initOutgoing → encrypt type 3 → initIncoming → decrypt → reply`), tetapi **tidak** ada pembandingan side-by-side dengan `libsignal` — jangan sebut match libsignal sebagai hal yang terbukti.
+**The arm64 and musl binaries have never been executed.** See
+[Platform support](#platform-support).
 
 ---
 
-## 🔍 Audit internal & Known Limitations
+## Known limitations
 
-Audit baris-per-baris penuh (Rust + JS + binding napi) — September 2026. Ringkasan temuan yang relevan bagi pengguna:
+The previous README carried an audit section whose findings are now mostly
+fixed. Each is listed with where it stands, so nothing is left as a stale
+alarm and nothing fixed is still presented as a live risk.
 
-### Yang sudah benar
+### Fixed
 
-- **Memory safety Rust**: seluruh file `#![deny(unsafe_code)]`, stateless (tanpa Mutex/thread/Arc/static mut) — **tidak ada leak di production path**.
-- Semua cache internal (di consumer) memakai LRU + TTL dan di-cleanup di `close()`.
+| Was | Now |
+|---|---|
+| The active session entry was the *first* `BTreeMap`/object value, so a multi-entry record could encrypt through an archived session | `current_session_mut` prefers `closed === -1`, then most recent `used` (`session.rs:237-254`) |
+| A re-init replaced the open session, losing its backlog | The old session is archived into the same record, capped at 40 entries (`session-cipher.js:149-178`) |
+| A one-time prekey was not consumed after `initIncoming` | Consumed after the MAC verifies, and a failing `removePreKey` is reported (`session-cipher.js:125-127`) |
+| `loadSignedPreKey()` took no id, so signed-prekey rotation produced a misleading MAC failure | Called with the id the message names, falling back to an argument-less call (`session-builder.js:65-75`) |
+| 4–6 JSON string round-trips per message | Decoded results cross as napi objects of `Buffer`s (`lib.rs:57-73`); a `SessionRecord` stores the canonical string verbatim (`session-record.js:12`); the remote identity is read natively from the record (`ratchet.rs:419`) |
+| Key material was never scrubbed | `Zeroize`/`ZeroizeOnDrop` on the record types (`session.rs:33-45`) and `Zeroizing` on every derived key (`x3dh.rs:34`, `ratchet.rs:161`) |
+| MAC comparison was not constant-time | `verify_truncated_left` (`ratchet.rs:585`) and `timingSafeEqual` (`crypto.js:67`) |
+| `block-modes` and `hkdf` were dead dependencies | Removed from `Cargo.toml` |
 
-### HIGH — direkomendasikan diperbaiki sebelum skala besar
+### Still open
 
-1. **Pemilihan session entry**: `values_mut().next()` (Rust) / `Object.values(_sessions)[0]` (JS wrapper) mengambil entry *pertama* BTreeMap/object, bukan entry `closed == -1` (session aktif). Record dengan ≥2 entry (migrasi dari libsignal, LID migration, retry-receipt) berisiko encrypt/decrypt dengan session terarsip. *Mitigasi sementara: pastikan record hanya berisi 1 session open (prune di consumer).*
-2. **Session lama di-replace, bukan diarsipkan** saat `initIncoming` dengan baseKey baru — backlog pesan dari session lama gagal decrypt (libsignal mengarsipkan di `_sessions`).
-3. **Serialisasi JSON berlapis** di hot path (4–6 roundtrip JSON + base64 per pesan; ciphertext sebagai array-angka JSON ±4× bloat). Fix kandidat: return `Buffer` + hapus roundtrip `session_serialize`/`SessionRecord` — estimasi mendekati raw native 278 µs.
-4. **`isTrustedIdentity` tidak pernah dipanggil wrapper** — perubahan identity key lawan tidak terdeteksi (libsignal throw `UntrustedIdentityKeyError` di titik ini). Implementasikan di `initIncoming` + decrypt path bila butuh TOFU enforcement.
+- **`isTrustedIdentity` is never called.** A peer changing its identity key is
+  not detected. Implement TOFU enforcement yourself.
+- **All 16 `native` exports are synchronous** and run on the calling thread.
+  An X3DH is four X25519 operations and blocks the event loop. Moving them to
+  napi async tasks is available and unused.
+- **One redundant X25519 per session build.** `x3dh.rs:121` and `x3dh.rs:180`
+  compute the same scalar multiply. Costs one extra operation; not a
+  correctness issue.
+- **`napi` is built with `features = ["full"]`.** Overkill for what is used,
+  and not cleaned up.
+- **`protoEncodePkmsg` is asymmetric with its decoder.** It takes a JSON string
+  whose byte fields are arrays of numbers, while `protoDecodePkmsg` returns
+  `Buffer`s. A decode/encode round-trip is not a no-op.
+- **Out-of-order delivery across a ratchet epoch.** See above.
 
-### MEDIUM (ringkas)
+### `crypto.encrypt` / `crypto.decrypt` are not a security primitive
 
-- One-time prekey tidak dihapus setelah `initIncoming` (replay possible bila record hilang) — libsignal memanggil `removePreKey`.
-- `loadSignedPreKey()` tanpa argumen ID — signed prekey rotasi menyebabkan MAC fail dengan error menyesatkan.
-- Semua operasi napi **sync** di main thread JS — X3DH (3–4× X25519) memblok event loop; kandidat pindah ke napi async Task.
-- Key material tidak di-zeroize (`zeroize` crate sudah ada di dependency tree); MAC compare non-constant-time (`subtle` tersedia via dalek).
-- Duplikasi X25519 di X3DH (`a3` == `shared_ratchet`, dihitung 2×).
+`src/crypto.js` ships in the package, is exported as `crypto`, and has its own
+tests. It is not dead code and is not going away: removing the export would
+break consumers using it.
 
-### Tidak ada di cakupan (by design)
-
-- **Sender Key / group E2EE** tidak diimplementasi — hanya X3DH + Double Ratchet 1:1. Consumer multi-device group (baileys fork) perlu implementasi SenderKey sendiri atau konsumen bertanggung jawab.
-
-### Dead code & dependency
-
-- ~~`block-modes` + `hkdf` crates~~ — **sudah dihapus** dari `Cargo.toml`.
-- ~~Duplikat binary `.node` 1MB di root repo~~ — **sudah dihapus**; repo tidak lagi melacak `.node` apa pun.
-- **`napi features = ["full"]`** — masih ada di `Cargo.toml` dan memang overkill, belum dibersihkan.
-- **`src/crypto.js`** — **bukan dead code dan tidak akan dihapus.** Lihat catatan di bawah.
-
-### Catatan API: `crypto.encrypt` / `crypto.decrypt`
-
-`src/crypto.js` shipped di dalam package (`files: ["src/"]`), diekspor sebagai `crypto` dari `index.js`, dan punya test sendiri di `tests/wrapper.test.mjs`. Ekspor ini tidak dihapus — menghapusnya adalah perubahan API publik yang merusak consumer yang memakainya.
-
-> ⚠️ **`crypto.encrypt` / `crypto.decrypt` bukan primitive keamanan.** Keduanya `createCipheriv('aes-256-cbc', ...)` murni: **tanpa autentikasi, tanpa MAC**. Plaintext bisa dimodifikasi bitwise oleh penyerang dan padding bisa diubah tanpa terdeteksi — ini kelemahan klasik CBC. Jangan pakai sebagai primitive keamanan. Untuk pesan yang butuh jaminan integritas, pakai `SessionCipher` (yang memakai MAC 8-byte ter-truncate). `crypto.*` hanya berguna untuk pembungkus data non-protokol, dan hanya bila kerahasiaan lebih penting daripada integritas. `crypto.deriveSecrets` dan `crypto.verifyMAC` tidak punya masalah ini.
+> **`encrypt` and `decrypt` are plain `createCipheriv('aes-256-cbc')` with no
+> MAC.** A ciphertext can be modified bitwise without detection, and the
+> padding can be changed. This is the classic CBC failure. Do not use them for
+> anything that needs integrity — use `SessionCipher`, which verifies an 8-byte
+> truncated MAC before it decrypts anything. `calculateMAC`, `hash`,
+> `deriveSecrets` and `verifyMAC` have no such problem. `crypto.*` is not used
+> by the protocol path at all: X3DH and the ratchet derive everything in Rust.
 
 ---
 
-## Changelog
+## Not implemented, by design
 
-| Versi | Isi |
-|-------|-----|
-| **0.2.0-rc.1** | Upstream dari 0.1.7 (audit internal: memory safety Rust bersih — zero `unsafe`, stateless, no leak production; oracle interop 2-arah bit-exact; out-of-order decrypt terverifikasi). Known issues & roadmap fix didokumentasikan di [Audit](#-audit-internal--known-limitations) |
-| **0.1.7** | Wire ephemeral key → **33-byte** (`0x05` prefix, format libsignal). `decryptPreKeyWhisperMessage` reuse session by baseKey (jangan selalu rebuild) — fix "Menunggu pesan ini" |
-| 0.1.6 | `decryptPreKeyWhisperMessage` selalu rebuild session dari pkmsg |
-| 0.1.5 | Signed prekey 33-byte utk verifikasi signature; prekey_pub strip internal utk DH |
-| 0.1.3 | Strip `0x05` prefix dari ephemeral key saat decrypt |
-| 0.1.2 | `SessionRecord` terima input object (libsignal serialize return object) |
-| 0.1.0 | Rilis pertama — full rewrite Rust + oracle test |
+- **SenderKey / group E2EE.** Multi-device group messaging needs a SenderKey
+  implementation the consumer supplies.
 
-## Lisensi
+---
 
-**MIT** — bebas dipakai, dimodifikasi, dan disebarluaskan, termasuk untuk komersial. Tidak seperti `libsignal` (GPL-3.0) yang membatasi distribusi.
+## License
 
-> ⚠️ **Disclaimer:** "Signal Protocol" adalah trademark dari Signal Foundation. Proyek ini independen, tidak berafiliasi dengan Signal, dan hanya implementasi ulang dari spesifikasi protokol yang sudah publik.
+**MIT** — use, modify and redistribute it, commercially included. This is the
+point of the package: `libsignal` is GPL-3.0, which many projects cannot ship.
+
+> **Disclaimer:** "Signal Protocol" is a trademark of the Signal Foundation.
+> This project is independent, is not affiliated with Signal, and is a
+> reimplementation of a publicly specified protocol.

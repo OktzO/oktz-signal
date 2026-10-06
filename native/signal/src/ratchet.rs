@@ -1013,6 +1013,28 @@ mod tests {
     // not use — is a silently undeliverable message.
     #[test]
     fn encrypt_refuses_an_ambiguous_record_with_two_sending_chains() {
+        // Replays the OLD selection — `chains.values().find(|c| c.is_sending())`,
+        // which walks the BTreeMap in ascending key order — against whatever map
+        // a half has just built, and returns the chain key it lands on. This is
+        // what makes the fixture non-vacuous. A decoy that map order never
+        // reaches cannot catch the regression, and that is exactly the mistake
+        // this test was first written with: the decoy id began with 'd' (0x64),
+        // which sorts ABOVE base64's alphabet, so it sat second and half (b)
+        // passed against the unfixed code. Asserting on the replay rather than
+        // on a key comparison means that cannot pass unnoticed again.
+        fn old_map_order_picks(record: &SessionRecord) -> String {
+            record
+                .sessions
+                .values()
+                .next()
+                .unwrap()
+                .chains
+                .values()
+                .find(|c| c.is_sending())
+                .and_then(|c| c.chainKey.key.clone())
+                .expect("fixture must have a sending chain")
+        }
+
         let (alice, bob, alice_id, bob_id) = build_pair();
         let mut record: SessionRecord = session::deserialize(&alice).unwrap();
         let pub_key = record.sessions.values().next().unwrap().currentRatchet.ephemeralKeyPair.pubKey.clone();
@@ -1027,21 +1049,22 @@ mod tests {
             .expect("fixture must have a sending chain keyed by the ephemeral public key");
         // Same position, a chain key Bob holds no copy of: whatever comes out
         // encrypted under it reaches him and fails his MAC.
+        let decoy_key = crate::util::b64(&[0xA5u8; 32]);
         let decoy_chain = |real: &Chain| {
             let mut decoy = real.clone();
-            decoy.chainKey.key = Some(crate::util::b64(&[0xA5u8; 32]));
+            decoy.chainKey.key = Some(decoy_key.clone());
             decoy
         };
-        // BTreeMap iterates in ascending key order, so map order picks the
-        // SMALLEST id. '!' (0x21) is below every base64 character, so a decoy
-        // named this way always sorts first — asserted rather than assumed, so
-        // this test cannot go vacuous if pubKey's encoding ever changes.
+        // '!' (0x21) is below every character base64 can produce, so a decoy
+        // named this way sorts first whatever pubKey encodes to.
         let decoy_id = format!("!decoy:{}", pub_key);
-        assert!(decoy_id < pub_key, "the decoy must sort before the named chain");
 
-        // Neither chain is keyed by ephemeralKeyPair.pubKey, so there is nothing
-        // to select explicitly and the choice falls to map order — which picks
-        // the decoy. Map order must not be the tiebreak.
+        // Half (a) — nothing keyed by pubKey. The record cannot say which chain
+        // the peer is on, so the fallback must refuse rather than guess. Catches
+        // the fallback rule: against the original map-order selection this half
+        // sees `encrypt` return Ok, and against the brief's literal step 3
+        // ("fall back to find(|c| c.is_sending())" when no id resolves) it does
+        // too.
         {
             let entry = record.sessions.values_mut().next().unwrap();
             entry.chains.clear();
@@ -1052,6 +1075,11 @@ mod tests {
                 .chains
                 .insert(format!("real:{}", pub_key), real.clone());
         }
+        assert_eq!(
+            old_map_order_picks(&record),
+            decoy_key,
+            "half (a): map order must reach the decoy, or this half cannot detect the bug"
+        );
         let err = match encrypt(&session::serialize(&record).unwrap(), b"ambiguous", &alice_id, 42) {
             Ok(_) => panic!("two sending chains must not be resolved by map order"),
             Err(e) => e,
@@ -1062,12 +1090,11 @@ mod tests {
             err
         );
 
-        // The named case, which is the one that actually decides which key the
-        // peer derives from: pubKey names a sending chain and a decoy sorts
-        // before it. The message must go out under the NAMED chain's key —
-        // Bob's receiving chain mirrors it, so it decrypts. Under the decoy's
-        // key it reaches Bob and fails his MAC, which is the failure this whole
-        // selection exists to prevent.
+        // Half (b) — pubKey names a sending chain. Catches the NAMED-selection rule,
+        // which half (a) does not: here the record is unambiguous and the
+        // message must go out under the NAMED chain's key, because Bob's
+        // receiving chain mirrors it. Under map order it reaches Bob and fails
+        // his MAC — the silently-undeliverable outcome, end to end.
         {
             let entry = record.sessions.values_mut().next().unwrap();
             entry.chains.clear();
@@ -1076,6 +1103,11 @@ mod tests {
                 .insert(decoy_id.clone(), decoy_chain(&real));
             entry.chains.insert(pub_key.clone(), real);
         }
+        assert_eq!(
+            old_map_order_picks(&record),
+            decoy_key,
+            "half (b): map order must reach the decoy, or this half cannot detect the bug"
+        );
         let enc = encrypt(&session::serialize(&record).unwrap(), b"named", &alice_id, 42)
             .unwrap_or_else(|e| panic!("a named sending chain must be selected: {}", e));
         let dec = decrypt_whisper(&bob, &enc.ciphertext, &bob_id)

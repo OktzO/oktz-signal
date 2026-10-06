@@ -215,7 +215,21 @@ pub fn scalar_multiply(secret_key: &[u8], public_key: &[u8]) -> Result<[u8; 32],
     let sk32: [u8; 32] = secret_key[..32].try_into().unwrap();
     let pk32: [u8; 32] = public_key[..32].try_into().unwrap();
     let shared = MontgomeryPoint(pk32).mul_clamped(sk32);
-    Ok(shared.to_bytes())
+    let bytes = shared.to_bytes();
+    // Contributory behaviour. A small-order peer key makes the output all-zero
+    // and discards this side's private key entirely, which would let anyone
+    // derive the same root key and chain key from public data alone. RFC 7748
+    // §6.1 allows this abort and names the OR-fold as the constant-time form;
+    // RFC 8418 §2 requires it for X25519. curve25519-dalek does not do it for
+    // us — MontgomeryPoint::IDENTITY exists so the caller can.
+    let mut acc = 0u8;
+    for b in bytes.iter() {
+        acc |= *b;
+    }
+    if acc == 0 {
+        return Err("non-contributory X25519 shared secret: peer key is small-order".to_string());
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -387,6 +401,53 @@ mod tests {
         let a = sign(&sk, msg, Some(&rnd)).unwrap();
         let b = sign(&sk, msg, Some(&rnd)).unwrap();
         assert_eq!(a, b, "an explicit rnd must still reproduce a fixed signature");
+    }
+
+    /// Every one of these forces X25519(sk, u) to all-zero, discarding the local
+    /// private key's contribution entirely (cofactor 8). curve25519-js@0.0.4
+    /// returns 0000..00 for each and raises nothing; RFC 7748 §6.1 permits
+    /// aborting, RFC 8418 §2 requires it.
+    ///
+    /// This is the complete set of u in F_p whose point has order dividing 8,
+    /// which is what the ladder needs since a clamped scalar is always a
+    /// multiple of 8: the order-2 point u = 0, the two order-4 points
+    /// u in {1, -1}, and the two order-8 points. u = p and u = p + 1 are extra
+    /// byte strings a peer can send that RFC 7748 decodeUCoordinate folds onto
+    /// 0 and 1, so a check written against the canonical encodings alone would
+    /// miss them.
+    const LOW_ORDER_POINTS: [&str; 7] = [
+        // order 2
+        "0000000000000000000000000000000000000000000000000000000000000000", // u = 0
+        // order 4
+        "0100000000000000000000000000000000000000000000000000000000000000", // u = 1
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // u = p - 1
+        // order 8
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        // non-canonical encodings of u = 0 and u = 1
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // u = p
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // u = p + 1
+    ];
+
+    #[test]
+    fn a_low_order_peer_key_is_rejected() {
+        let sk = [7u8; 32];
+        for p in LOW_ORDER_POINTS.iter() {
+            let u = hex_to_bytes(p);
+            assert!(
+                scalar_multiply(&sk, &u).is_err(),
+                "low-order point {} produced an accepted shared secret",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_peer_key_still_computes() {
+        let (pk_a, sk_a) = generate_keypair(&[3u8; 32]).unwrap();
+        let (pk_b, sk_b) = generate_keypair(&[9u8; 32]).unwrap();
+        assert_ne!(scalar_multiply(&sk_a, &pk_b).unwrap(), [0u8; 32]);
+        assert_ne!(scalar_multiply(&sk_b, &pk_a).unwrap(), [0u8; 32]);
     }
 
     #[test]

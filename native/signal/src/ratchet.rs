@@ -304,10 +304,12 @@ fn peek_message_key(chain: &Chain, counter: i64) -> Result<Option<String>, Strin
 // will write is derived here, from the entry as it stands, so the step can be
 // dropped on a MAC failure with the record never having been touched.
 struct RatchetPlan {
-    // Chain-map key of the chain to drop: the receiving chain this step
-    // retires. The id it is stored under, not a recomputed one, so a record
-    // keyed the legacy 32-byte way is emptied correctly too.
-    retired_recv_chain: Option<String>,
+    // Chain-map keys the chain this step retires may be stored under, every
+    // encoding of the previous remote ephemeral key. Not just the canonical
+    // one: the lookup in plan_ratchet falls back across widths, so a record
+    // keyed the legacy 32-byte way is found — and would then survive the step
+    // still holding its chain key if only the first id were carried here.
+    retired_recv_ids: Vec<String>,
     receiving_chain_id: String,
     last_remote_ephemeral_key: String,
     previous_counter: u32,
@@ -345,8 +347,8 @@ fn plan_ratchet(
     // Removing it instead is strictly tighter and is what an oktz-signal record
     // holds, so a record libsignal wrote is read and then left in the
     // canonical shape.
-    let retired_recv_chain = if entry.currentRatchet.lastRemoteEphemeralKey.is_empty() {
-        None
+    let retired_recv_ids = if entry.currentRatchet.lastRemoteEphemeralKey.is_empty() {
+        Vec::new()
     } else {
         let prev_ids = chain_key_ids_b64(&entry.currentRatchet.lastRemoteEphemeralKey);
         if let Some(prev_chain) = find_chain(&entry.chains, &prev_ids) {
@@ -354,7 +356,7 @@ fn plan_ratchet(
                 peek_message_key(prev_chain, previous_counter as i64)?;
             }
         }
-        prev_ids.into_iter().next()
+        prev_ids
     };
 
     // 2. Receiving chain.
@@ -391,7 +393,7 @@ fn plan_ratchet(
     let new_pub_id = crate::util::b64(&new_pub_wire);
 
     Ok(Some(RatchetPlan {
-        retired_recv_chain,
+        retired_recv_ids,
         receiving_chain_id: remote_key_ids[0].clone(),
         last_remote_ephemeral_key: remote_key_ids[0].clone(),
         previous_counter: plan_previous_counter,
@@ -420,8 +422,12 @@ fn plan_ratchet(
 }
 
 fn apply_ratchet(entry: &mut SessionEntry, plan: RatchetPlan) {
-    if let Some(retired) = plan.retired_recv_chain {
-        entry.chains.remove(&retired);
+    // Every id the retired chain may be stored under, for the reason the plan
+    // carries all of them: removing only the first leaves a legacy-keyed chain
+    // in the map holding a live chain key. The ids are encodings of one key, so
+    // this cannot reach any other chain.
+    for id in &plan.retired_recv_ids {
+        entry.chains.remove(id);
     }
     entry
         .chains
@@ -910,6 +916,40 @@ mod tests {
         assert!(
             !entry.chains.contains_key(&prev_recv_key),
             "retired receiving chain must not survive the step"
+        );
+    }
+
+    // A chain stored under the legacy 32-byte id must still be removed when
+    // lastRemoteEphemeralKey names the same key in the canonical 33-byte wire
+    // form. The existing ratchet tests set both widths equal, so the lookup has
+    // only one id to try and the removal trivially agrees with it; here the two
+    // widths differ, which is the only way the fallback in chain_key_ids_b64
+    // can find a chain that .next() would not have named.
+    #[test]
+    fn a_receiving_chain_stored_under_the_legacy_32_byte_id_is_removed() {
+        let (_, bob, _, _) = build_pair();
+        let mut record: SessionRecord = session::deserialize(&bob).unwrap();
+        let entry = record.sessions.values_mut().next().unwrap();
+        let legacy_id = entry.chains.keys().next().cloned().unwrap();
+        let legacy_raw = crate::util::unb64(&legacy_id).unwrap();
+        assert_eq!(
+            legacy_raw.len(),
+            32,
+            "fixture must start with the receiving chain keyed by the legacy 32-byte id"
+        );
+        let retired_chain_key = entry.chains[&legacy_id].chainKey.key.clone();
+        let mut wire = vec![0x05u8];
+        wire.extend_from_slice(&legacy_raw);
+        entry.currentRatchet.lastRemoteEphemeralKey = crate::util::b64(&wire);
+
+        let (remote_pub, _) = curve::generate_keypair(&[0x9Au8; 32]).unwrap();
+        let remote_ids = chain_key_ids(&remote_pub);
+        let plan = plan_ratchet(entry, &remote_ids, 0).unwrap().unwrap();
+        apply_ratchet(entry, plan);
+
+        assert!(
+            !entry.chains.values().any(|c| c.is_receiving() && c.chainKey.key == retired_chain_key),
+            "the retired receiving chain must not survive the step with a live chain key"
         );
     }
 

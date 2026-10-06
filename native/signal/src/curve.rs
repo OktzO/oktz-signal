@@ -408,25 +408,38 @@ mod tests {
     /// returns 0000..00 for each and raises nothing; RFC 7748 §6.1 permits
     /// aborting, RFC 8418 §2 requires it.
     ///
-    /// This is the complete set of u in F_p whose point has order dividing 8,
-    /// which is what the ladder needs since a clamped scalar is always a
-    /// multiple of 8: the order-2 point u = 0, the two order-4 points
-    /// u in {1, -1}, and the two order-8 points. u = p and u = p + 1 are extra
-    /// byte strings a peer can send that RFC 7748 decodeUCoordinate folds onto
-    /// 0 and 1, so a check written against the canonical encodings alone would
-    /// miss them.
-    const LOW_ORDER_POINTS: [&str; 7] = [
+    /// Seven distinct field values, each in both of its wire spellings —
+    /// fourteen byte strings. The two per value are related only by bit 255,
+    /// which RFC 7748's decodeUCoordinate *masks* rather than reducing mod p, so
+    /// they decode to the same coordinate. Testing both spellings pins that
+    /// masking behaviour; a future change to how the coordinate is decoded would
+    /// otherwise only show up on one of the two.
+    ///
+    /// The values are the complete set of u in F_p whose point has order
+    /// dividing 8, which is what the ladder needs since a clamped scalar is
+    /// always a multiple of 8: the order-2 point u = 0, the two order-4 points
+    /// u in {1, p-1}, and the two order-8 points. u = p and u = p + 1 are not
+    /// canonical encodings of anything; they are extra byte strings a peer can
+    /// send that decode onto 0 and 1.
+    const LOW_ORDER_POINTS: [&str; 14] = [
         // order 2
         "0000000000000000000000000000000000000000000000000000000000000000", // u = 0
+        "0000000000000000000000000000000000000000000000000000000000000080", // u = 0, bit 255 set
         // order 4
         "0100000000000000000000000000000000000000000000000000000000000000", // u = 1
+        "0100000000000000000000000000000000000000000000000000000000000080", // u = 1, bit 255 set
         "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // u = p - 1
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // u = p - 1, bit 255 set
         // order 8
         "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7", // ... bit 255 set
         "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
-        // non-canonical encodings of u = 0 and u = 1
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880", // ... bit 255 set
+        // non-canonical encodings, folding onto u = 0 and u = 1
         "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // u = p
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // u = p, bit 255 set
         "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // u = p + 1
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // u = p + 1, bit 255 set
     ];
 
     #[test]
@@ -434,11 +447,18 @@ mod tests {
         let sk = [7u8; 32];
         for p in LOW_ORDER_POINTS.iter() {
             let u = hex_to_bytes(p);
-            assert!(
-                scalar_multiply(&sk, &u).is_err(),
-                "low-order point {} produced an accepted shared secret",
-                p
-            );
+            // Match the message, not just is_err(): check_len would satisfy a
+            // bare is_err() too, which would leave this test passing if the
+            // contributory check were ever deleted.
+            match scalar_multiply(&sk, &u) {
+                Ok(_) => panic!("low-order point {} produced an accepted shared secret", p),
+                Err(e) => assert!(
+                    e.contains("non-contributory"),
+                    "low-order point {} failed for the wrong reason: {}",
+                    p,
+                    e
+                ),
+            }
         }
     }
 

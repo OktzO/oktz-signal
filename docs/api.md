@@ -411,7 +411,7 @@ console.log('native.default === native: %s', native.default === native);
 | function | signature | behaviour |
 |---|---|---|
 | `curveGenerateKeypair` | `(seed: Buffer) => [pub: Buffer, priv: Buffer]` | Both 32 bytes. Deterministic in `seed`. Rejects a seed with too little entropy (a constant or near-constant seed clamps to a publicly known scalar) — `curve.rs:189`. |
-| `curveScalarMultiply` | `(secretKey: Buffer, publicKey: Buffer) => Buffer` | X25519. Both 32 bytes. A 33-byte `0x05`-prefixed key is **not** accepted; strip the prefix first. |
+| `curveScalarMultiply` | `(secretKey: Buffer, publicKey: Buffer) => Buffer` | X25519. Both 32 bytes. A 33-byte `0x05`-prefixed key is **not** accepted; strip the prefix first. Throws when the shared secret comes out all-zero — a small-order peer key would discard this side's private key entirely and leave the result derivable from public data (`curve.rs:230`). |
 | `curveSign` | `(secretKey: Buffer, message: Buffer, random?: Buffer \| null) => Buffer` | XEdDSA, 64 bytes. `random` is 64 bytes and pins the nonce; omit it and 64 bytes come from `OsRng`. |
 | `curveVerify` | `(publicKey: Buffer, message: Buffer, signature: Buffer) => boolean` | `verify_strict`, so a low-order public key cannot authenticate a forgery (`curve.rs:178`). |
 

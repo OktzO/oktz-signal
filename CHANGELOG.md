@@ -13,6 +13,25 @@ under "Security" applies to you.
 
 ### Security
 
+**An all-zero X25519 shared secret was accepted** (`885f202`). Curve25519 has
+cofactor 8, so a peer that supplies a small-order public key forces
+`X25519(sk, u)` to all-zero and erases every contribution of the local private
+key. The recipient's X3DH outputs are then fixed by public data alone, so the
+peer knows the same root key and sending chain key. Nothing limited this to an
+already-trusted contact: `UntrustedIdentityKeyError` is declared at
+`src/errors.js:7` and never thrown, so the trust-on-first-use gate is absent.
+On the recipient side the sender's ephemeral public key is unauthenticated at
+that point and feeds `a1`, `a3` and `a4` (`x3dh.rs:238-255`), so one small-order
+value there reaches all three. `curve25519-dalek` does not perform this check —
+`MontgomeryPoint::IDENTITY` exists so the caller can — and the JS path was only
+safe by accident, via OpenSSL's `ERR_OSSL_FAILED_DURING_DERIVATION`. RFC 7748
+§6.1 permits the abort and names the OR-fold as the constant-time form; RFC 8418
+§2 requires it for X25519. The shared secret is now OR-folded and rejected when
+all-zero (`curve.rs:225-231`), closing the vector for both X3DH DHs and both
+ratchet DHs at one site (`x3dh.rs:238,240,242,255`, `ratchet.rs:304,321`).
+Tests: `a_low_order_peer_key_is_rejected` (all 14 wire-distinct spellings),
+`a_valid_peer_key_still_computes`.
+
 **Message forgery through a retired chain** (`88f8173`, `38fd6da`). A
 receiving chain retired by a DH ratchet step was left in the chain map with
 its key blanked. `fill_message_keys` then derived every message key from that

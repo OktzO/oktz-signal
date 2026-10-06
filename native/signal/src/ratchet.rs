@@ -40,6 +40,13 @@ type HmacSha256 = Hmac<Sha256>;
 /// 2000 ahead of it, and a chain at 1_000_000 has nothing left to fill.
 const MAX_SKIP: i64 = 2000;
 
+/// Total cap on retained skipped keys per chain. MAX_SKIP bounds the distance
+/// of a single jump; this bounds the store, which is what a peer that sends
+/// counters MAX_SKIP apart, repeatedly, would otherwise grow without limit.
+/// signalapp/libsignal separates the two as MAX_FORWARD_JUMPS and
+/// MAX_MESSAGE_KEYS; we keep MAX_SKIP's value for both and add this.
+const MAX_RETAINED_MESSAGE_KEYS: usize = 2000;
+
 // AES-256-CBC (32-byte key) encrypt, manual (block-modes 0.9.1 is deprecated-empty).
 fn aes_cbc_encrypt(key: &[u8], iv: &[u8; 16], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let cipher = Aes256::new_from_slice(key).map_err(|e| format!("AES key: {}", e))?;
@@ -184,6 +191,24 @@ pub(crate) fn derive_secrets_n(
     Ok(out)
 }
 
+// Drop the oldest retained keys until the store is within
+// MAX_RETAINED_MESSAGE_KEYS. BTreeMap iterates in ascending key order and a key
+// IS its counter, so pop_first takes the lowest counter — the oldest key. That
+// is the right one to lose: a counter further in the past is the least likely
+// to still be redelivered. An evicted key is unrecoverable — there is no way to
+// re-derive it without walking the chain key back from the current position,
+// which is exactly what this cap exists to prevent — so eviction is a real
+// loss, not a cache miss. That is accepted deliberately: the cap must hold at
+// every return point, and the alternative (no cap) is unbounded growth driven
+// by any peer that holds the chain key.
+fn evict_oldest_message_keys(chain: &mut Chain) {
+    while chain.messageKeys.len() > MAX_RETAINED_MESSAGE_KEYS {
+        if chain.messageKeys.pop_first().is_none() {
+            break;
+        }
+    }
+}
+
 // Derive + store message keys for skipped counters (recursive chain key step).
 // Per oracle:
 //   if counter <= chainKey.counter → return
@@ -192,6 +217,38 @@ pub(crate) fn derive_secrets_n(
 //   chainKey.key = HMAC(chainKey.key, [0x02])
 //   chainKey.counter += 1
 //   recurse
+//
+// The store is capped at MAX_RETAINED_MESSAGE_KEYS (see evict_oldest_message_keys).
+// Eviction is placed AFTER each insert and BEFORE the recursion, and only there.
+// Three placements were considered:
+//   - Before every recursion level, including on entry: REJECTED, see below.
+//   - Once after the recursion returns (i.e. only at the outermost level):
+//     rejected, because fill_message_keys inserts one key per level, so a single
+//     legal MAX_SKIP jump would carry the store at 2 * MAX_RETAINED_MESSAGE_KEYS
+//     for the whole descent — exactly the over-cap state the cap exists to stop.
+//   - After each insert, before recursing: CHOSEN. The store is at or under the
+//     cap before and after every insert, so a chain that STARTS within the cap
+//     peaks at cap + 1 for the single instant between the insert and the trim,
+//     and every return point of every level is at or under the cap — with no
+//     dependence on where the outermost level happens to unwind.
+//
+// Evicting on ENTRY was rejected on evidence, not on preference. decrypt_entry
+// peeks the message key, verifies the MAC, then calls this function and removes
+// the key by counter (ratchet.rs decrypt_entry). A record written by an uncapped
+// producer — libsignal-js's fillMessageKeys has no store cap at all — can arrive
+// with a store already over the limit. Trimming on entry then discards the very
+// key peek had just found and the MAC had just verified, and the remove that
+// follows fails with "message key not found": a redelivered message that
+// decrypts correctly today stops decrypting. Trimming after the insert instead
+// leaves such a record's existing keys alone, and normalises the store on the
+// first fill that actually grows it — so the cap still converges, and no
+// readable message is lost to a trim it did not need.
+//
+// The cost of that choice is stated rather than hidden: until a growing fill
+// happens, an over-cap record read from an uncapped producer keeps its extra
+// keys. The cap bounds what THIS code accumulates, which is the unbounded-growth
+// problem being fixed; it is not a claim that every possible on-disk record is
+// already within the limit.
 fn fill_message_keys(chain: &mut Chain, counter: i64) -> Result<(), String> {
     if counter <= chain.chainKey.counter {
         return Ok(());
@@ -212,6 +269,7 @@ fn fill_message_keys(chain: &mut Chain, counter: i64) -> Result<(), String> {
         chain.chainKey.counter + 1,
         crate::util::b64(&message_key),
     );
+    evict_oldest_message_keys(chain);
     chain.chainKey.key = Some(crate::util::b64(&next_chain_key));
     chain.chainKey.counter += 1;
     fill_message_keys(chain, counter)
@@ -989,6 +1047,122 @@ mod tests {
         wire.extend_from_slice(&proto::encode_whisper(msg).unwrap());
         wire.extend_from_slice(&[0u8; 8]); // deliberately wrong MAC
         wire
+    }
+
+    // MAX_SKIP is a distance bound; nothing bounded the store. A peer that
+    // already holds the chain key could send counters MAX_SKIP apart, for ever,
+    // and every one of those messages would retain a full complement of skipped
+    // keys. build_pair gives Bob a receiving chain at counter -1 with a real
+    // chain key, which is what the jump arithmetic below is measured against.
+    #[test]
+    fn retained_message_keys_are_capped_across_many_jumps() {
+        let (_, bob, _, _) = build_pair();
+        let mut record: SessionRecord = session::deserialize(&bob).unwrap();
+        let entry = record.sessions.values_mut().next().unwrap();
+        let chain = entry
+            .chains
+            .values_mut()
+            .find(|c| c.is_receiving())
+            .expect("fixture must have a receiving chain");
+        assert_eq!(
+            chain.chainKey.counter, -1,
+            "the receiving chain must start at -1 for the jump arithmetic below"
+        );
+
+        // Every jump is the largest MAX_SKIP permits, so under a store with no
+        // cap each message adds MAX_SKIP retained keys.
+        for _ in 0..5 {
+            let target = chain.chainKey.counter + MAX_SKIP;
+            fill_message_keys(chain, target).unwrap();
+            assert!(
+                chain.messageKeys.len() <= MAX_RETAINED_MESSAGE_KEYS,
+                "skipped-key store grew to {} entries",
+                chain.messageKeys.len()
+            );
+        }
+
+        // The cap says nothing about WHICH keys go, so pin the direction down:
+        // the store must hold the newest counters and drop the oldest. Evicting
+        // the newest instead would leave every incoming message without the key
+        // it needs — the counter a message arrives on is always the newest one
+        // the fill derived, so it is the last thing that may be discarded.
+        assert_eq!(
+            chain.messageKeys.len(),
+            MAX_RETAINED_MESSAGE_KEYS,
+            "a chain filling past the cap must sit exactly at it"
+        );
+        let newest = *chain.messageKeys.keys().next_back().unwrap();
+        let oldest = *chain.messageKeys.keys().next().unwrap();
+        assert_eq!(
+            newest, chain.chainKey.counter,
+            "the newest derived key must be retained"
+        );
+        assert_eq!(
+            oldest,
+            chain.chainKey.counter - (MAX_RETAINED_MESSAGE_KEYS as i64 - 1),
+            "the oldest counters must be the ones evicted"
+        );
+    }
+
+    #[test]
+    fn a_single_2000_message_jump_is_still_accepted() {
+        // The cap is a TOTAL bound on the store, not a tighter distance bound.
+        // Bob's receiving chain sits at -1, so his furthest legal counter is
+        // -1 + MAX_SKIP; a message arriving exactly there must still decrypt.
+        // If the cap were enforced as a tighter per-jump limit, or if eviction
+        // took the newest keys instead of the oldest, this is the test that
+        // would catch it.
+        let (alice, bob, alice_id, bob_id) = build_pair();
+        let far_counter = MAX_SKIP - 1; // the furthest Bob can be sent
+        let mut alice: SessionRecord = session::deserialize(&alice).unwrap();
+        {
+            let entry = alice.sessions.values_mut().next().unwrap();
+            let sending = entry
+                .chains
+                .values_mut()
+                .find(|c| c.is_sending())
+                .expect("fixture must have a sending chain");
+            // Walk Alice to the counter before the far one; encrypt then emits
+            // far_counter itself. Doing it through fill_message_keys rather than
+            // by hand means Alice's own store goes through the same cap.
+            fill_message_keys(sending, far_counter - 1).unwrap();
+        }
+        let enc = encrypt(
+            &session::serialize(&alice).unwrap(),
+            b"far jump",
+            &alice_id,
+            42,
+        )
+        .unwrap();
+        let (msg, _, _) = split_wire(&enc.ciphertext);
+        assert_eq!(
+            msg.counter as i64, far_counter,
+            "the message must sit at the furthest legal counter"
+        );
+
+        let dec = decrypt_whisper(&bob, &enc.ciphertext, &bob_id)
+            .unwrap_or_else(|e| panic!("a MAX_SKIP jump must still decrypt: {}", e));
+        assert_eq!(dec.plaintext, b"far jump");
+
+        let rec: SessionRecord = session::deserialize(&dec.session_json).unwrap();
+        let entry = rec.sessions.values().next().unwrap();
+        let chain = entry.chains.values().find(|c| c.is_receiving()).unwrap();
+        assert_eq!(
+            chain.chainKey.counter, far_counter,
+            "the chain must advance to the message it just decrypted"
+        );
+        assert!(
+            !chain.messageKeys.contains_key(&far_counter),
+            "the message's own key must have been consumed"
+        );
+        // That jump derived MAX_SKIP keys and the cap is MAX_SKIP, so a single
+        // legal jump must evict nothing at all: every key it derived is still
+        // here, less the one just used.
+        assert_eq!(
+            chain.messageKeys.len(),
+            MAX_RETAINED_MESSAGE_KEYS - 1,
+            "a single legal jump must not evict any key it derived"
+        );
     }
 
     #[test]

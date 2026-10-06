@@ -489,11 +489,43 @@ pub fn encrypt(
     };
     let previous_counter = entry.currentRatchet.previousCounter;
 
-    let chain = entry
-        .chains
-        .values_mut()
-        .find(|c| c.is_sending())
-        .ok_or("no sending chain")?;
+    // libsignal selects the sending chain explicitly —
+    // session.getChain(session.currentRatchet.ephemeralKeyPair.pubKey) — and
+    // then asserts the chain it got is not a receiving chain. Map order is not a
+    // substitute for either half of that. `chains` is a BTreeMap keyed by
+    // base64, so `find(|c| c.is_sending())` returned the lexicographically
+    // smallest sending chain, which in a record holding two is not necessarily
+    // the peer's: the message then goes out under a chain key the peer never
+    // derives from — emitted, delivered, and silently undeliverable.
+    let sending_ids = chain_key_ids_b64(&entry.currentRatchet.ephemeralKeyPair.pubKey);
+    let named_sending = find_chain(&entry.chains, &sending_ids).map_or(false, Chain::is_sending);
+    let chain = if named_sending {
+        find_chain_mut(&mut entry.chains, &sending_ids).ok_or("no sending chain")?
+    } else {
+        // pubKey names no sending chain. Two records are legitimately in that
+        // state and must keep encrypting: one written before the chain key was
+        // aligned to the 33-byte wire form, which keys the chain the legacy way,
+        // and a self-session record, which keys the receiving mirror of the
+        // sending chain by pubKey. Both are unambiguous while exactly one chain
+        // is a sending chain. More than one means the record cannot say which
+        // chain the peer is on, and choosing between them by map order is the
+        // failure being fixed here, so refuse instead of guessing.
+        match entry.chains.values().filter(|c| c.is_sending()).count() {
+            0 => return Err("no sending chain".to_string()),
+            1 => entry
+                .chains
+                .values_mut()
+                .find(|c| c.is_sending())
+                .ok_or("no sending chain")?,
+            n => {
+                return Err(format!(
+                    "ambiguous sending chain: {} chains are sending and none is keyed by the \
+                     current ephemeralKeyPair.pubKey",
+                    n
+                ))
+            }
+        }
+    };
 
     let target_counter = chain
         .chainKey
@@ -973,6 +1005,82 @@ mod tests {
             "a counter that does not fit the u32 wire field must be named, got: {}",
             err
         );
+    }
+
+    // Two sending chains can only appear in a hand-mangled or mixed-provenance
+    // record, but libsignal asserts the invariant rather than trusting map
+    // order, and the failure mode — encrypting under a chain key the peer will
+    // not use — is a silently undeliverable message.
+    #[test]
+    fn encrypt_refuses_an_ambiguous_record_with_two_sending_chains() {
+        let (alice, bob, alice_id, bob_id) = build_pair();
+        let mut record: SessionRecord = session::deserialize(&alice).unwrap();
+        let pub_key = record.sessions.values().next().unwrap().currentRatchet.ephemeralKeyPair.pubKey.clone();
+        let real = record
+            .sessions
+            .values()
+            .next()
+            .unwrap()
+            .chains
+            .get(&pub_key)
+            .cloned()
+            .expect("fixture must have a sending chain keyed by the ephemeral public key");
+        // Same position, a chain key Bob holds no copy of: whatever comes out
+        // encrypted under it reaches him and fails his MAC.
+        let decoy_chain = |real: &Chain| {
+            let mut decoy = real.clone();
+            decoy.chainKey.key = Some(crate::util::b64(&[0xA5u8; 32]));
+            decoy
+        };
+        // BTreeMap iterates in ascending key order, so map order picks the
+        // SMALLEST id. '!' (0x21) is below every base64 character, so a decoy
+        // named this way always sorts first — asserted rather than assumed, so
+        // this test cannot go vacuous if pubKey's encoding ever changes.
+        let decoy_id = format!("!decoy:{}", pub_key);
+        assert!(decoy_id < pub_key, "the decoy must sort before the named chain");
+
+        // Neither chain is keyed by ephemeralKeyPair.pubKey, so there is nothing
+        // to select explicitly and the choice falls to map order — which picks
+        // the decoy. Map order must not be the tiebreak.
+        {
+            let entry = record.sessions.values_mut().next().unwrap();
+            entry.chains.clear();
+            entry
+                .chains
+                .insert(decoy_id.clone(), decoy_chain(&real));
+            entry
+                .chains
+                .insert(format!("real:{}", pub_key), real.clone());
+        }
+        let err = match encrypt(&session::serialize(&record).unwrap(), b"ambiguous", &alice_id, 42) {
+            Ok(_) => panic!("two sending chains must not be resolved by map order"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("ambiguous"),
+            "the refusal must name the ambiguity, got: {}",
+            err
+        );
+
+        // The named case, which is the one that actually decides which key the
+        // peer derives from: pubKey names a sending chain and a decoy sorts
+        // before it. The message must go out under the NAMED chain's key —
+        // Bob's receiving chain mirrors it, so it decrypts. Under the decoy's
+        // key it reaches Bob and fails his MAC, which is the failure this whole
+        // selection exists to prevent.
+        {
+            let entry = record.sessions.values_mut().next().unwrap();
+            entry.chains.clear();
+            entry
+                .chains
+                .insert(decoy_id.clone(), decoy_chain(&real));
+            entry.chains.insert(pub_key.clone(), real);
+        }
+        let enc = encrypt(&session::serialize(&record).unwrap(), b"named", &alice_id, 42)
+            .unwrap_or_else(|e| panic!("a named sending chain must be selected: {}", e));
+        let dec = decrypt_whisper(&bob, &enc.ciphertext, &bob_id)
+            .unwrap_or_else(|e| panic!("the named chain's message must decrypt: {}", e));
+        assert_eq!(dec.plaintext, b"named");
     }
 
     #[test]

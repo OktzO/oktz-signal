@@ -3,11 +3,11 @@
 Every entry below is traceable to a commit in this repository. Where a fix has
 a test, the test is named.
 
-## Unreleased — on `main`, after `v0.3.0-rc.1`
+## Unreleased — on `main`, after `v0.3.0-rc.2`
 
-`v0.3.0-rc.1` is tagged at `8dfc4d3`. **Every commit after it is not
-released** — 57 of them at the time of writing. `package.json` already says
-`0.3.0-rc.1`, so the version on npm today is `8dfc4d3` and contains none of
+`v0.3.0-rc.2` is tagged at `54b12a3`. **Every commit after it is not
+released** — 7 of them at the time of writing. `package.json` already says
+`0.3.0-rc.2`, so the version on npm today is `54b12a3` and contains none of
 the security work below. If you are running the published package, every item
 under "Security" applies to you.
 
@@ -28,7 +28,7 @@ safe by accident, via OpenSSL's `ERR_OSSL_FAILED_DURING_DERIVATION`. RFC 7748
 §6.1 permits the abort and names the OR-fold as the constant-time form; RFC 8418
 §2 requires it for X25519. The shared secret is now OR-folded and rejected when
 all-zero (`curve.rs:225-231`), closing the vector for both X3DH DHs and both
-ratchet DHs at one site (`x3dh.rs:238,240,242,255`, `ratchet.rs:304,321`).
+ratchet DHs at one site (`x3dh.rs:238,240,242,255`, `ratchet.rs:364,381`).
 Tests: `a_low_order_peer_key_is_rejected` (all 14 wire-distinct spellings),
 `a_valid_peer_key_still_computes`.
 

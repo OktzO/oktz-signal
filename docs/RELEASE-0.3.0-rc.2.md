@@ -2,7 +2,7 @@
 
 Signal protocol (X3DH + Double Ratchet) as a Rust native module for Node, MIT licensed, a drop-in replacement for the GPL `libsignal`. A thin JS wrapper sits on top of the napi binding.
 
-```bash
+```bash nonrunnable
 npm install oktz-signal
 ```
 
@@ -31,7 +31,7 @@ the IV, and produce a ciphertext that passed the real 8-byte MAC check.
 The MAC input is `remoteIdentityKey || ourIdentityKey || 0x33 || message`, all
 of it public. The forged message decrypted correctly.
 
-```
+```text nonrunnable
 before:  DECRYPT SUCCEEDED — attacker plaintext = "FORGED BY ATTACKER"
 after:   forgery REJECTED: receiving chain is closed
 ```

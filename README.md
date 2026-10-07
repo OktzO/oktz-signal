@@ -4,7 +4,7 @@
 
 ### Signal Protocol native Rust — MIT replacement for `libsignal` (GPL)
 
-[![Version](https://img.shields.io/badge/npm-0.3.0--rc.1-339933?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/oktz-signal)
+[![Version](https://img.shields.io/badge/npm-0.3.0--rc.2-339933?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/oktz-signal)
 [![Node](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
@@ -31,11 +31,11 @@ block on every documentation page, so none of it can quietly go stale.
   reading plus the tests written from it — not an assessment.
 - **Linux only.** There is no macOS and no Windows build. See
   [Platform support](#platform-support).
-- **The version on `main` is not what `0.3.0-rc.1` shipped as.** `v0.3.0-rc.1`
-  is tagged at `8dfc4d3`, and every commit after it — 57 of them at the time
+- **The version on `main` is not what `0.3.0-rc.2` shipped as.** `v0.3.0-rc.2`
+  is tagged at `54b12a3`, and every commit after it — 7 of them at the time
   of writing, including every security fix in [the
   changelog](./CHANGELOG.md) — is **unreleased**. `package.json` still says
-  `0.3.0-rc.1`, so the package on npm today is `8dfc4d3` and contains none of
+  `0.3.0-rc.2`, so the package on npm today is `54b12a3` and contains none of
   that work.
 - Wire compatibility with real WhatsApp clients is not guaranteed in every
   edge case. The interop evidence is against `libsignal` v6, which is a

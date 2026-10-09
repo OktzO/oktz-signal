@@ -31,12 +31,11 @@ block on every documentation page, so none of it can quietly go stale.
   reading plus the tests written from it — not an assessment.
 - **Linux only.** There is no macOS and no Windows build. See
   [Platform support](#platform-support).
-- **The version on `main` is not what `0.3.0-rc.2` shipped as.** `v0.3.0-rc.2`
-  is tagged at `54b12a3`, and every commit after it — 7 of them at the time
-  of writing, including every security fix in [the
-  changelog](./CHANGELOG.md) — is **unreleased**. `package.json` still says
-  `0.3.0-rc.2`, so the package on npm today is `54b12a3` and contains none of
-  that work.
+- **`0.3.0-rc.2` shipped without any of the security work in [the
+  changelog](./CHANGELOG.md).** `v0.3.0-rc.2` is tagged at `54b12a3`; the
+  all-zero shared-secret rejection, the skipped-key cap and the rest land in
+  **`0.3.0-rc.3`**. If you are on rc.2, upgrade — rc.2 accepts a shared secret
+  that hands a peer your session keys.
 - Wire compatibility with real WhatsApp clients is not guaranteed in every
   edge case. The interop evidence is against `libsignal` v6, which is a
   strong signal but not the same thing.

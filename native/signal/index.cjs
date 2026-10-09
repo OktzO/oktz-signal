@@ -20,10 +20,10 @@ const loadErrors = []
 // the `catch` re-buried it as a MODULE_NOT_FOUND candidate miss. The checks
 // are now unconditional, and a mismatch propagates out of requireNative()
 // instead of joining the candidate list.
-const __napiBindingVersionIsStale = (bindingPackageVersion) => bindingPackageVersion !== '0.3.0-rc.2'
+const __napiBindingVersionIsStale = (bindingPackageVersion) => bindingPackageVersion !== '0.3.0-rc.3'
 
 const __napiBindingVersionMismatch = (bindingPackageVersion, flavor) => {
-  const error = new Error(`${flavor || 'Native'} binding package version mismatch, expected 0.3.0-rc.2 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+  const error = new Error(`${flavor || 'Native'} binding package version mismatch, expected 0.3.0-rc.3 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
   error.code = 'ERR_NAPI_BINDING_VERSION_MISMATCH'
   return error
 }

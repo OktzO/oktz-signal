@@ -3,13 +3,10 @@
 Every entry below is traceable to a commit in this repository. Where a fix has
 a test, the test is named.
 
-## Unreleased — on `main`, after `v0.3.0-rc.2`
+`v0.3.0-rc.3` is the release that carries the security work below. `v0.3.0-rc.2`
+is tagged at `54b12a3` and contains none of it — if you are running rc.2, every
+item under "Security" applies to you and you should move to rc.3.
 
-`v0.3.0-rc.2` is tagged at `54b12a3`. **Every commit after it is not
-released** — 7 of them at the time of writing. `package.json` already says
-`0.3.0-rc.2`, so the version on npm today is `54b12a3` and contains none of
-the security work below. If you are running the published package, every item
-under "Security" applies to you.
 
 ### Security
 
